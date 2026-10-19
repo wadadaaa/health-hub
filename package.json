@@ -1,0 +1,32 @@
+{
+  "name": "health-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal health hub: meals + wearables (Apple Health, Oura) behind an MCP server for Claude",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "ingest:oura": "tsx src/ingest/oura-cli.ts",
+    "test:smoke": "tsx test/smoke.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "express": "^5.1.0",
+    "node-cron": "^4.2.1",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.15.5",
+    "pg-mem": "^3.0.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

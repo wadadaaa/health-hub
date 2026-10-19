@@ -1,0 +1,9 @@
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:3000 {
+		# MCP responses can be long-lived; don't let the proxy cut them.
+		transport http {
+			read_timeout 300s
+		}
+	}
+}
