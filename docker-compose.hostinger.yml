@@ -1,14 +1,29 @@
 # Deployment variant for a Hostinger VPS running the "Ubuntu + Docker + Traefik"
-# template, where Traefik already owns ports 80/443 (network_mode: host, docker
-# provider, exposedbydefault=false, certresolver "letsencrypt").
+# template, deployed from hPanel (VPS -> Docker Manager -> Compose -> "Compose
+# from URL"):
 #
-# Deploy from hPanel: VPS -> Docker Manager -> Compose -> "Compose from URL":
 #   https://raw.githubusercontent.com/wadadaaa/health-hub/main/docker-compose.hostinger.yml
-# then set POSTGRES_PASSWORD, MCP_PATH_SECRET and API_TOKEN in the Environment
-# field (generate each with: openssl rand -hex 24).
 #
-# For a plain VPS with nothing on 80/443, use docker-compose.yml instead: it
-# brings its own Caddy.
+# then set these in the panel's Environment field:
+#
+#   APP_HOST=health.srv1728444.hstgr.cloud
+#   POSTGRES_PASSWORD=...     # openssl rand -hex 24
+#   MCP_PATH_SECRET=...       # openssl rand -hex 24
+#   API_TOKEN=...             # openssl rand -hex 24
+#
+# Two things differ from docker-compose.yml:
+#
+#   * No Caddy. Traefik already owns 80/443 on this template (network_mode:
+#     host, docker provider, exposedbydefault=false, certresolver "letsencrypt"),
+#     so the app attaches to it with labels.
+#
+#   * No `build:`. The panel deploys with `docker compose up -d` and does not
+#     build images, so the app runs on the stock node image and fetches its own
+#     source at startup. That costs an npm install on every container start and
+#     buys a deployment that needs no registry and no shell on the box.
+#
+# For a plain VPS with a shell and nothing on 80/443, use docker-compose.yml:
+# it builds the Dockerfile and brings its own Caddy.
 
 services:
   db:
@@ -27,7 +42,7 @@ services:
       retries: 10
 
   app:
-    build: https://github.com/wadadaaa/health-hub.git
+    image: node:22-alpine
     restart: unless-stopped
     depends_on:
       db:
@@ -41,6 +56,20 @@ services:
       OURA_CRON: ${OURA_CRON:-17 * * * *}
       OURA_BACKFILL_DAYS: ${OURA_BACKFILL_DAYS:-3}
       TZ_LOCAL: ${TZ_LOCAL:-Asia/Jerusalem}
+      SOURCE_REPO: ${SOURCE_REPO:-https://github.com/wadadaaa/health-hub.git}
+      SOURCE_REF: ${SOURCE_REF:-main}
+    working_dir: /srv
+    command:
+      - sh
+      - -ec
+      - |
+        apk add --no-cache git >/dev/null
+        rm -rf /srv/app
+        git clone --depth 1 --branch "$$SOURCE_REF" "$$SOURCE_REPO" /srv/app
+        cd /srv/app
+        npm ci --no-audit --no-fund
+        npm run build
+        exec node dist/index.js
     labels:
       - traefik.enable=true
       - traefik.http.routers.healthhub.rule=Host(`${APP_HOST:?set APP_HOST}`)
