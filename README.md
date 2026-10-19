@@ -102,8 +102,24 @@ claude mcp add --transport http health-hub https://$DOMAIN/mcp \
 
 ### Oura
 
-Create a personal access token at https://cloud.ouraring.com/personal-access-tokens
-and set `OURA_TOKEN`. The server syncs hourly (`OURA_CRON`) over the last
+Oura stopped issuing personal access tokens, so this uses OAuth2 (authorization
+code with PKCE).
+
+1. Register an application at https://cloud.ouraring.com/oauth/applications with
+   redirect URI `https://$DOMAIN/oura/callback`.
+2. Set `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET` and `PUBLIC_URL`, then redeploy.
+3. Open `https://$DOMAIN/oura/connect/$MCP_PATH_SECRET` once and approve. The
+   callback stores the tokens and immediately backfills the last 14 days.
+
+The connect route sits behind the same secret as the MCP endpoint, so a stranger
+cannot bind their own Oura account to the server; the callback is a fixed URI
+(Oura matches it exactly) and is guarded by the `state` it issued.
+
+Refresh tokens are single-use: every refresh returns a new one, and the server
+replaces the stored row in the same statement. `GET /api/oura/status` reports
+whether it is connected and when the current access token expires.
+
+After that the server syncs hourly (`OURA_CRON`) over the last
 `OURA_BACKFILL_DAYS` days, and once at startup. A longer backfill:
 
 ```bash
@@ -170,7 +186,9 @@ Worth pasting into project instructions or memory:
 
 ```bash
 npm install
+npm test               # both suites below
 npm run test:smoke     # in-memory Postgres (pg-mem): MCP handshake, tools, webhooks, REST
+npm run test:oura      # Oura OAuth2: PKCE, single-use state, refresh rotation
 npm run dev            # needs DATABASE_URL and the secrets in the environment
 npm run build
 ```

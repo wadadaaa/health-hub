@@ -13,7 +13,7 @@ import {
   updateMeal,
   weightTrend,
 } from './service.js';
-import { ingestOura } from './ingest/oura.js';
+import { ingestOura, type TokenSource } from './ingest/oura.js';
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] });
 
@@ -25,14 +25,15 @@ const dayArg = z
 
 export interface McpDeps {
   db: Queryable;
-  ouraToken?: string;
+  /** A static token or a refreshing provider; null when Oura is unconfigured. */
+  ouraTokenSource?: TokenSource | null;
 }
 
 /**
  * One McpServer per request (stateless Streamable HTTP). Cheap: tool registration only.
  * Tool descriptions are written for the model that calls them (Claude in claude.ai / Claude Code / a bot).
  */
-export function createMcpServer({ db, ouraToken }: McpDeps): McpServer {
+export function createMcpServer({ db, ouraTokenSource }: McpDeps): McpServer {
   const server = new McpServer({ name: 'health-hub', version: '0.1.0' });
 
   server.registerTool(
@@ -181,12 +182,12 @@ export function createMcpServer({ db, ouraToken }: McpDeps): McpServer {
     'sync_oura',
     {
       title: 'Sync Oura now',
-      description: 'Pull the last N days from the Oura API into daily metrics (also runs on a schedule). Requires OURA_TOKEN on the server.',
+      description: 'Pull the last N days from the Oura API into daily metrics (also runs on a schedule). Requires Oura to be connected on the server.',
       inputSchema: { days: z.number().int().min(1).max(30).default(3) },
     },
     async ({ days }) => {
-      if (!ouraToken) return json({ error: 'OURA_TOKEN is not configured on the server' });
-      return json(await ingestOura(db, ouraToken, days));
+      if (!ouraTokenSource) return json({ error: 'Oura is not configured on the server' });
+      return json(await ingestOura(db, ouraTokenSource, days));
     },
   );
 

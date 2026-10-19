@@ -1,12 +1,18 @@
 import cron from 'node-cron';
 import type { Queryable } from './db.js';
-import { ingestOura } from './ingest/oura.js';
+import { ingestOura, type TokenSource } from './ingest/oura.js';
 
-export function startOuraCron(db: Queryable, token: string, expression: string, backfillDays: number, tz: string) {
+export function startOuraCron(
+  db: Queryable,
+  tokenSource: TokenSource,
+  expression: string,
+  backfillDays: number,
+  tz: string,
+) {
   if (!cron.validate(expression)) throw new Error(`Invalid OURA_CRON: ${expression}`);
   const run = async () => {
     try {
-      const r = await ingestOura(db, token, backfillDays);
+      const r = await ingestOura(db, tokenSource, backfillDays);
       console.log(`[oura] synced ${r.days.length} day(s): ${r.days.join(', ') || '-'}`);
     } catch (e) {
       console.error('[oura] sync failed:', e instanceof Error ? e.message : e);

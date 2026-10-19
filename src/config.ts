@@ -10,7 +10,14 @@ const schema = z.object({
   MCP_PATH_SECRET: z.string().min(24),
   API_TOKEN: z.string().min(24),
 
+  // Public origin, used to build the Oura redirect URI.
+  PUBLIC_URL: z.string().url().optional(),
+
+  // Legacy Oura personal access token. Oura deprecated these; OAuth2 below
+  // takes precedence when both are configured.
   OURA_TOKEN: z.string().optional(),
+  OURA_CLIENT_ID: z.string().optional(),
+  OURA_CLIENT_SECRET: z.string().optional(),
   OURA_CRON: z.string().default('17 * * * *'),
   OURA_BACKFILL_DAYS: z.coerce.number().int().positive().default(3),
 

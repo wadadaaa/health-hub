@@ -60,7 +60,22 @@ export interface OuraIngestResult {
   days: string[];
 }
 
-export async function ingestOura(db: Queryable, token: string, days = 3, endDay: string = today()): Promise<OuraIngestResult> {
+/** A bearer token, or something that produces one (OAuth2 refreshes on demand). */
+export type TokenSource = string | (() => Promise<string | null>);
+
+async function resolveToken(source: TokenSource): Promise<string> {
+  const token = typeof source === 'string' ? source : await source();
+  if (!token) throw new Error('Oura is not connected');
+  return token;
+}
+
+export async function ingestOura(
+  db: Queryable,
+  tokenSource: TokenSource,
+  days = 3,
+  endDay: string = today(),
+): Promise<OuraIngestResult> {
+  const token = await resolveToken(tokenSource);
   const start = shiftDay(endDay, -(days - 1));
   // Oura's end_date is exclusive for some collections; ask one day extra and filter.
   const end = shiftDay(endDay, 1);

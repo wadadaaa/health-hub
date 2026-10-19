@@ -11,6 +11,14 @@
 #   MCP_PATH_SECRET=...       # openssl rand -hex 24
 #   API_TOKEN=...             # openssl rand -hex 24
 #
+# To sync Oura, register an app at https://cloud.ouraring.com/oauth/applications
+# with redirect URI https://<APP_HOST>/oura/callback, then add:
+#
+#   OURA_CLIENT_ID=...
+#   OURA_CLIENT_SECRET=...
+#
+# and visit https://<APP_HOST>/oura/connect/<MCP_PATH_SECRET> once.
+#
 # Two things differ from docker-compose.yml:
 #
 #   * No Caddy. Traefik already owns 80/443 on this template (network_mode:
@@ -52,6 +60,9 @@ services:
       PORT: "3000"
       MCP_PATH_SECRET: ${MCP_PATH_SECRET:?set MCP_PATH_SECRET}
       API_TOKEN: ${API_TOKEN:?set API_TOKEN}
+      PUBLIC_URL: ${PUBLIC_URL:-https://${APP_HOST}}
+      OURA_CLIENT_ID: ${OURA_CLIENT_ID:-}
+      OURA_CLIENT_SECRET: ${OURA_CLIENT_SECRET:-}
       OURA_TOKEN: ${OURA_TOKEN:-}
       OURA_CRON: ${OURA_CRON:-17 * * * *}
       OURA_BACKFILL_DAYS: ${OURA_BACKFILL_DAYS:-3}

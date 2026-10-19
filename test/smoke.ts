@@ -21,9 +21,9 @@ console.log('migrations:', ran);
 const config = {
   MCP_PATH_SECRET: 'test-secret-path-123456789012345678',
   API_TOKEN: 'test-api-token-1234567890123456789',
-  OURA_TOKEN: undefined,
 };
-const app = createApp({ db, config });
+const oura = { oauth: null, tokenSource: null };
+const app = createApp({ db, config, oura });
 const server = app.listen(0);
 const port = (server.address() as AddressInfo).port;
 const base = `http://127.0.0.1:${port}`;

@@ -5,13 +5,21 @@ import type { Config } from './config.js';
 import type { Queryable } from './db.js';
 import { isDay, today } from './dates.js';
 import { ingestHealthAutoExport, ingestShortcut } from './ingest/apple.js';
-import { ingestOura } from './ingest/oura.js';
+import { ingestOura, type TokenSource } from './ingest/oura.js';
+import { completeFlow, startFlow, status as ouraStatus, type OuraOAuthConfig } from './oura-auth.js';
 import { createMcpServer } from './mcp.js';
 import { getDay, getWeek, logMeal, weightTrend } from './service.js';
 
 export interface AppDeps {
   db: Queryable;
-  config: Pick<Config, 'MCP_PATH_SECRET' | 'API_TOKEN' | 'OURA_TOKEN'>;
+  config: Pick<Config, 'MCP_PATH_SECRET' | 'API_TOKEN'>;
+  /** Null when Oura has not been configured at all. */
+  oura: {
+    /** OAuth2 app credentials; null when only a legacy personal token is set. */
+    oauth: OuraOAuthConfig | null;
+    /** A static token or a refreshing provider; null when Oura is unconfigured. */
+    tokenSource: TokenSource | null;
+  };
 }
 
 function safeEqual(a: string | undefined, b: string): boolean {
@@ -27,7 +35,7 @@ function bearer(req: Request): string | undefined {
   return m?.[1]?.trim();
 }
 
-export function createApp({ db, config }: AppDeps) {
+export function createApp({ db, config, oura }: AppDeps) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -55,7 +63,7 @@ export function createApp({ db, config }: AppDeps) {
       res.status(404).json({ error: 'not found' }); // don't advertise the endpoint
       return;
     }
-    const server = createMcpServer({ db, ouraToken: config.OURA_TOKEN });
+    const server = createMcpServer({ db, ouraTokenSource: oura.tokenSource });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless: one server+transport per request
       enableJsonResponse: true,
@@ -83,6 +91,61 @@ export function createApp({ db, config }: AppDeps) {
     app.get(path, mcpMethodNotAllowed);
     app.delete(path, mcpMethodNotAllowed);
   }
+
+  // ---------- Oura OAuth2 ----------
+  // The start of the flow is behind the same secret as the MCP endpoint, so a
+  // stranger cannot bind their own Oura account to this server. The callback is
+  // a fixed URI (Oura requires an exact match) and is guarded by `state`.
+  const page = (title: string, body: string) =>
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>${title}</title>` +
+    `<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;` +
+    `background:#0f1115;color:#e6e8ee}main{max-width:32rem;padding:2rem}h1{font-size:1.25rem;margin:0 0 .5rem}` +
+    `p{margin:.25rem 0;color:#aab}</style><main>${body}</main>`;
+
+  app.get('/oura/connect/:secret', async (req, res) => {
+    if (!safeEqual(req.params.secret, config.MCP_PATH_SECRET)) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    if (!oura.oauth) {
+      res.status(400).send(page('Oura', '<h1>Oura is not configured</h1><p>Set OURA_CLIENT_ID, OURA_CLIENT_SECRET and PUBLIC_URL, then redeploy.</p>'));
+      return;
+    }
+    const { url } = await startFlow(db, oura.oauth);
+    res.redirect(302, url);
+  });
+
+  app.get('/oura/callback', async (req, res) => {
+    if (!oura.oauth) {
+      res.status(400).send(page('Oura', '<h1>Oura is not configured</h1>'));
+      return;
+    }
+    const { code, state, error } = req.query as Record<string, string | undefined>;
+    if (error) {
+      res.status(400).send(page('Oura', `<h1>Oura declined</h1><p>${String(error).slice(0, 120)}</p>`));
+      return;
+    }
+    if (!code || !state) {
+      res.status(400).send(page('Oura', '<h1>Missing code or state</h1><p>Start again from the connect link.</p>'));
+      return;
+    }
+    try {
+      const tokens = await completeFlow(db, oura.oauth, code, state);
+      // Pull the recent past straight away so there is data to look at.
+      let synced = 0;
+      try {
+        const r = await ingestOura(db, tokens.access_token, 14);
+        synced = r.days.length;
+      } catch {
+        /* the cron will retry */
+      }
+      res.send(page('Oura connected', `<h1>Oura connected</h1><p>Synced ${synced} day(s). You can close this tab.</p>`));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      res.status(400).send(page('Oura', `<h1>Could not finish connecting</h1><p>${message.slice(0, 200)}</p>`));
+    }
+  });
 
   // ---------- Webhooks (Bearer API_TOKEN) ----------
   app.post('/webhook/health-auto-export', requireApiToken, async (req, res) => {
@@ -134,12 +197,16 @@ export function createApp({ db, config }: AppDeps) {
   });
 
   api.post('/ingest/oura', async (req, res) => {
-    if (!config.OURA_TOKEN) {
-      res.status(400).json({ error: 'OURA_TOKEN not configured' });
+    if (!oura.tokenSource) {
+      res.status(400).json({ error: 'Oura is not configured' });
       return;
     }
     const days = Math.min(90, Math.max(1, Number(req.query.days ?? 3) || 3));
-    res.json(await ingestOura(db, config.OURA_TOKEN, days));
+    res.json(await ingestOura(db, oura.tokenSource, days));
+  });
+
+  api.get('/oura/status', async (_req, res) => {
+    res.json({ ...(await ouraStatus(db)), oauth_configured: oura.oauth !== null });
   });
 
   app.use('/api', api);

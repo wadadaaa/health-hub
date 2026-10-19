@@ -12,7 +12,9 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "ingest:oura": "tsx src/ingest/oura-cli.ts",
-    "test:smoke": "tsx test/smoke.ts"
+    "test:smoke": "tsx test/smoke.ts",
+    "test:oura": "tsx test/oura-auth.ts",
+    "test": "npm run test:smoke && npm run test:oura"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
