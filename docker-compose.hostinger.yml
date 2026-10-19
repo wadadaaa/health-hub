@@ -1,0 +1,52 @@
+# Deployment variant for a Hostinger VPS running the "Ubuntu + Docker + Traefik"
+# template, where Traefik already owns ports 80/443 (network_mode: host, docker
+# provider, exposedbydefault=false, certresolver "letsencrypt").
+#
+# Deploy from hPanel: VPS -> Docker Manager -> Compose -> "Compose from URL":
+#   https://raw.githubusercontent.com/wadadaaa/health-hub/main/docker-compose.hostinger.yml
+# then set POSTGRES_PASSWORD, MCP_PATH_SECRET and API_TOKEN in the Environment
+# field (generate each with: openssl rand -hex 24).
+#
+# For a plain VPS with nothing on 80/443, use docker-compose.yml instead: it
+# brings its own Caddy.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: health
+      POSTGRES_USER: health
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U health -d health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: https://github.com/wadadaaa/health-hub.git
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://health:${POSTGRES_PASSWORD}@db:5432/health
+      PORT: "3000"
+      MCP_PATH_SECRET: ${MCP_PATH_SECRET:?set MCP_PATH_SECRET}
+      API_TOKEN: ${API_TOKEN:?set API_TOKEN}
+      OURA_TOKEN: ${OURA_TOKEN:-}
+      OURA_CRON: ${OURA_CRON:-17 * * * *}
+      OURA_BACKFILL_DAYS: ${OURA_BACKFILL_DAYS:-3}
+      TZ_LOCAL: ${TZ_LOCAL:-Asia/Jerusalem}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.healthhub.rule=Host(`${APP_HOST:?set APP_HOST}`)
+      - traefik.http.routers.healthhub.entrypoints=websecure
+      - traefik.http.routers.healthhub.tls.certresolver=letsencrypt
+      - traefik.http.services.healthhub.loadbalancer.server.port=3000
+
+volumes:
+  pgdata:

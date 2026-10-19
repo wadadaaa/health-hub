@@ -1,108 +1,147 @@
 # health-hub
 
-Личный бэкенд: приёмы пищи + данные с носимых устройств (Apple Watch / Apple Health, Oura) в Postgres,
-наружу — MCP-сервер для Claude (claude.ai, Claude Code) и небольшой REST API для своих клиентов (Telegram-бот и т.п.).
+A personal backend for meals and wearable data: Postgres for storage, an MCP server
+for Claude, and a small REST API for your own clients (a Telegram bot, a dashboard).
 
 ```
                     ┌─────────────────────────┐
   claude.ai ──MCP──▶│                         │◀── Health Auto Export (iOS)  POST /webhook/health-auto-export
   Claude Code ─MCP─▶│  health-hub (Node/TS)   │◀── iOS Shortcut              POST /webhook/shortcut
-  Telegram-бот ─REST▶│  + Postgres             │──▶ Oura API v2 (cron)
+  your bot ──REST──▶│  + Postgres             │──▶ Oura API v2 (hourly cron)
                     └─────────────────────────┘
 ```
 
-Всё состояние — в своей БД. Фото еды остаётся в чате; в базу уходят оценка (ккал/БЖУ) и описание.
+Photos of meals stay in the chat; what lands in the database is the estimate
+(calories, macros) and a short description.
 
-## Стек
+## Stack
 
-Node 22, TypeScript, Express 5, `@modelcontextprotocol/sdk` (Streamable HTTP, stateless), `pg`, `node-cron`.
-Деплой: docker-compose (app + Postgres 16 + Caddy с автоматическим HTTPS).
+Node 22, TypeScript, Express 5, `@modelcontextprotocol/sdk` (stateless Streamable
+HTTP), `pg`, `node-cron`. Deployment: docker compose — app + Postgres 16, with
+either Caddy (standalone) or an existing Traefik (Hostinger template).
 
-## Данные
+## Data model
 
-| Таблица | Что |
+| Table | What it holds |
 |---|---|
-| `meals` | приёмы пищи: `day` (локальный календарный день, Asia/Jerusalem), ккал, Б/Ж/У, confidence, source |
-| `daily_metrics` | по одной строке на `(day, source)`: active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min, raw payload |
-| `weights` | взвешивания |
-| `targets` | версии целей; действует последняя с `valid_from <= day` |
+| `meals` | one row per meal: local calendar `day`, kcal, protein/fat/carbs, confidence, source |
+| `daily_metrics` | one row per `(day, source)`: active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min, raw payload |
+| `weights` | weigh-ins |
+| `targets` | versioned targets; the latest row with `valid_from <= day` applies |
 
-**Бюджет дня** = `kcal + active_factor × max(0, active_kcal − active_baseline)`, не ниже `min_kcal`.
-По умолчанию: 1500 + 0.6 × max(0, active − 300), минимум 1400. Добавка идёт в углеводы, белок и жир фиксированы.
-`day_type = training`, если тренировка ≥ 20 мин или active_kcal ≥ baseline + 250.
+**Daily budget** = `kcal + active_factor × max(0, active_kcal − active_baseline)`,
+never below `min_kcal`. Defaults: `1500 + 0.6 × max(0, active − 300)`, floor 1400.
+The extra from activity is added to carbs; protein and fat targets stay fixed.
+A day counts as `training` when a workout ran for 20+ minutes or active energy
+exceeded `baseline + 250`.
 
-Когда один день есть в нескольких источниках: активные ккал/шаги/тренировка — Apple важнее Oura; сон/HRV/пульс покоя/readiness — Oura важнее Apple; `manual` перебивает всё.
+When several sources report the same day, fields are merged by precedence:
+active energy, steps and workout minutes prefer Apple over Oura; sleep, HRV,
+resting heart rate and readiness prefer Oura over Apple; `manual` always wins.
 
-## MCP-инструменты
+Days are computed in the app against `TZ_LOCAL`, not in SQL, so a midnight snack
+lands on the day you'd expect.
 
-`log_meal`, `update_meal`, `delete_meal`, `get_day`, `get_week`, `log_weight`, `weight_trend`, `get_targets`, `set_targets`, `sync_oura`.
+## MCP tools
 
-Эндпоинты:
-- `POST https://$DOMAIN/mcp/$MCP_PATH_SECRET` — без заголовков, для **claude.ai → Add custom connector** (там нельзя задать свои заголовки, поэтому секрет в пути).
-- `POST https://$DOMAIN/mcp` с `Authorization: Bearer $API_TOKEN` — для Claude Code и ботов.
+`log_meal`, `update_meal`, `delete_meal`, `get_day`, `get_week`, `log_weight`,
+`weight_trend`, `get_targets`, `set_targets`, `sync_oura`.
 
-Неверный секрет → 404, чтобы эндпоинт не светился.
+Two endpoints serve them:
 
-## Деплой на VPS
+- `POST https://$DOMAIN/mcp/$MCP_PATH_SECRET` — no headers, for **claude.ai →
+  Add custom connector**, which cannot send custom headers; the secret therefore
+  lives in the path.
+- `POST https://$DOMAIN/mcp` with `Authorization: Bearer $API_TOKEN` — for Claude
+  Code and bots.
+
+A wrong secret returns 404 rather than 401, so the endpoint does not advertise itself.
+
+## Deploying
+
+### Hostinger VPS (Docker + Traefik template)
+
+Traefik already holds 80/443, so the app attaches to it with labels instead of
+running its own reverse proxy.
+
+1. hPanel → VPS → Docker Manager → **Compose** → **Compose from URL**:
+   `https://raw.githubusercontent.com/wadadaaa/health-hub/main/docker-compose.hostinger.yml`
+2. Fill the **Environment** field:
+   ```
+   APP_HOST=health.srv1728444.hstgr.cloud
+   POSTGRES_PASSWORD=<openssl rand -hex 24>
+   MCP_PATH_SECRET=<openssl rand -hex 24>
+   API_TOKEN=<openssl rand -hex 24>
+   ```
+3. Deploy. Traefik requests the certificate on first request.
+
+### Any other VPS
 
 ```bash
-git clone <repo> && cd health-hub
+git clone https://github.com/wadadaaa/health-hub && cd health-hub
 cp .env.example .env
 openssl rand -hex 24   # ×3: POSTGRES_PASSWORD, MCP_PATH_SECRET, API_TOKEN
-# впиши DOMAIN (A-запись на VPS), секреты, OURA_TOKEN
+# set DOMAIN (an A record pointing at the box) and the secrets
 docker compose up -d --build
-docker compose logs -f app      # [db] applied migrations: 001_init.sql
 curl https://$DOMAIN/healthz
 ```
 
-Миграции (`sql/*.sql`) применяются при старте приложения. Порты 80/443 должны быть открыты в фаерволе.
+Migrations in `sql/*.sql` run at startup. Ports 80 and 443 must be open.
 
-### Подключить в claude.ai
+### Connecting Claude
 
-Settings → Connectors → Add custom connector → URL `https://$DOMAIN/mcp/$MCP_PATH_SECRET`, без OAuth.
-Проверить в новом чате: «что у меня по бюджету сегодня?» → Claude вызовет `get_day`.
-
-### Подключить в Claude Code
+claude.ai → Settings → Connectors → Add custom connector →
+`https://$DOMAIN/mcp/$MCP_PATH_SECRET`, no OAuth.
 
 ```bash
-claude mcp add --transport http health-hub https://$DOMAIN/mcp --header "Authorization: Bearer $API_TOKEN"
+claude mcp add --transport http health-hub https://$DOMAIN/mcp \
+  --header "Authorization: Bearer $API_TOKEN"
 ```
+
+## Feeding it data
 
 ### Oura
 
-Personal access token: https://cloud.ouraring.com/personal-access-tokens → `OURA_TOKEN` в `.env`.
-Синк каждый час (`OURA_CRON`), последние `OURA_BACKFILL_DAYS` дней, плюс сразу при старте. Разовый бэкфилл:
+Create a personal access token at https://cloud.ouraring.com/personal-access-tokens
+and set `OURA_TOKEN`. The server syncs hourly (`OURA_CRON`) over the last
+`OURA_BACKFILL_DAYS` days, and once at startup. A longer backfill:
 
 ```bash
-docker compose exec app node dist/ingest/oura-cli.js 60   # последние 60 дней
+docker compose exec app node dist/ingest/oura-cli.js 60
 ```
 
 ### Apple Health / Apple Watch
 
-Облачного API у Apple Health нет. Два пути:
+Apple offers no cloud API, so the phone pushes. Two ways:
 
-**1. Health Auto Export** (App Store, платное) — Automations → новый → тип REST API:
-- URL: `https://$DOMAIN/webhook/health-auto-export`
-- Headers: `Authorization: Bearer $API_TOKEN`
-- Format: JSON; Aggregate: Days (или Hours — парсер суммирует); Period: Today или Previous days
-- Metrics: Active Energy, Step Count, Resting Heart Rate, Heart Rate Variability, Sleep Analysis, Weight/Body Mass, Apple Exercise Time; Workouts: включить
-- Interval: каждые 1–2 часа
+**Health Auto Export** (App Store, paid) — Automations → new → REST API:
 
-Единицы (kJ/kcal, lb/kg, часы сна) конвертируются автоматически. Незнакомые метрики попадают в ответ как `unknown` и в `payload`.
+- URL `https://$DOMAIN/webhook/health-auto-export`, header `Authorization: Bearer $API_TOKEN`
+- Format JSON, aggregate by day or hour, period today or previous days
+- Metrics: Active Energy, Step Count, Resting Heart Rate, Heart Rate Variability,
+  Sleep Analysis, Weight/Body Mass, Apple Exercise Time; enable Workouts
+- Interval: every 1–2 hours
 
-**2. Shortcut** (бесплатно, грубее) — «Find Health Samples» для нужных типов за сегодня → собрать словарь → «Get Contents of URL»:
-- `POST https://$DOMAIN/webhook/shortcut`, header `Authorization: Bearer $API_TOKEN`, JSON:
+Units are converted automatically (kJ → kcal, lb → kg, sleep hours → minutes).
+Metrics the parser doesn't recognise come back in the response under `unknown`
+and are kept in `payload`.
+
+**A Shortcut** (free, coarser) — "Find Health Samples" for the types you want,
+assemble a dictionary, then "Get Contents of URL":
 
 ```json
 { "date": "2026-10-19", "active_kcal": 412, "steps": 7800, "resting_hr": 55,
   "hrv": 38, "sleep_min": 405, "workout_min": 35, "weight_kg": 82.0 }
 ```
 
-Все поля опциональны; `"source": "manual"` — чтобы перебить данные устройств. Запускать по расписанию через Automations (например, в 22:00).
+to `POST https://$DOMAIN/webhook/shortcut` with the same bearer header. Every
+field is optional; `"source": "manual"` overrides whatever the devices reported.
+Run it from an Automation on a schedule.
 
-Oura тоже пишет в Apple Health, так что через HAE можно обойтись без токена Oura — но readiness тогда не будет.
+Oura also writes into Apple Health, so Health Auto Export alone can cover both —
+but readiness scores only arrive through the Oura API.
 
-## REST для своих клиентов (Bearer `API_TOKEN`)
+## REST API (bearer `API_TOKEN`)
 
 ```
 GET  /api/day?date=YYYY-MM-DD
@@ -112,27 +151,34 @@ POST /api/meals        { description, kcal, protein_g?, fat_g?, carbs_g?, confid
 POST /api/ingest/oura?days=3
 ```
 
-Telegram-бот: фото → Claude API (vision) → оценка → `POST /api/meals` → ответ с `remaining` из `GET /api/day`.
+A Telegram bot: photo → Claude API (vision) → estimate → `POST /api/meals` →
+reply with `remaining` from `GET /api/day`.
 
-## Инструкция для Claude (вставить в Project instructions или memory)
+## Instructions for Claude
 
-> При фото еды: сначала `get_day`, затем оценка ккал/БЖУ по верхне-средней границе, `log_meal` с confidence,
-> в ответе — что в тарелке, оценка, остаток на день. Если пользователь уточняет состав — `update_meal` по id.
-> Вес из чата — `log_weight`. Прогресс оценивать по `weight_trend.avg7` и `delta_week`, не по одному взвешиванию.
-> Бюджет считает сервер (`get_day.budget`); не пересчитывать вручную.
+Worth pasting into project instructions or memory:
 
-## Разработка
+> On a food photo: call `get_day` first, estimate calories and macros at the
+> upper-middle of the plausible range, then `log_meal` with a confidence. Reply
+> with what's on the plate, the estimate, and what's left for the day. If the
+> user corrects an ingredient, `update_meal` by id. A weight mentioned in chat
+> goes to `log_weight`. Judge progress by `weight_trend.avg7` and `delta_week`,
+> never by a single weigh-in. The budget comes from `get_day.budget` — don't
+> recompute it by hand.
+
+## Development
 
 ```bash
 npm install
-npm run test:smoke     # in-memory Postgres (pg-mem): MCP handshake, инструменты, вебхуки, REST
-npm run dev            # локально нужен DATABASE_URL и секреты в окружении
+npm run test:smoke     # in-memory Postgres (pg-mem): MCP handshake, tools, webhooks, REST
+npm run dev            # needs DATABASE_URL and the secrets in the environment
 npm run build
 ```
 
-## Что дальше
+## Next
 
-- OAuth 2.1 перед `/mcp` (SDK даёт `mcpAuthRouter`), чтобы убрать секрет из пути.
-- Telegram-бот на Railway поверх `/api/*`.
-- Дашборд недели (artifact или своя страница) по `/api/week`.
-- Ночной отчёт: cron → итог дня → push.
+- OAuth 2.1 in front of `/mcp` (the SDK ships `mcpAuthRouter`), to drop the
+  secret from the path.
+- A Telegram bot on top of `/api/*`.
+- A weekly dashboard over `/api/week`.
+- A nightly job that posts the day's summary.
