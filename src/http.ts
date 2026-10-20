@@ -7,12 +7,15 @@ import { isDay, today } from './dates.js';
 import { ingestHealthAutoExport, ingestShortcut } from './ingest/apple.js';
 import { ingestOura, type TokenSource } from './ingest/oura.js';
 import { completeFlow, startFlow, status as ouraStatus, type OuraOAuthConfig } from './oura-auth.js';
+import type { Readiness } from './readiness.js';
 import { createMcpServer } from './mcp.js';
 import { getDay, getWeek, logMeal, weightTrend } from './service.js';
 
 export interface AppDeps {
   db: Queryable;
   config: Pick<Config, 'MCP_PATH_SECRET' | 'API_TOKEN'>;
+  /** Startup state; the server listens before the database is reachable. */
+  readiness?: Readiness;
   /** Null when Oura has not been configured at all. */
   oura: {
     /** OAuth2 app credentials; null when only a legacy personal token is set. */
@@ -35,7 +38,7 @@ function bearer(req: Request): string | undefined {
   return m?.[1]?.trim();
 }
 
-export function createApp({ db, config, oura }: AppDeps) {
+export function createApp({ db, config, oura, readiness }: AppDeps) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -47,9 +50,29 @@ export function createApp({ db, config, oura }: AppDeps) {
     res.status(401).json({ error: 'unauthorized' });
   };
 
+  // Reports the startup state rather than just liveness: with no shell on the
+  // box this is the only way to see why the app is not serving.
   app.get('/healthz', (_req, res) => {
-    res.json({ ok: true, day: today() });
+    const r = readiness;
+    if (!r || r.phase === 'ready') {
+      res.json({ ok: true, day: today(), migrations: r?.migrations ?? [] });
+      return;
+    }
+    res.status(503).json({
+      ok: false,
+      day: today(),
+      phase: r.phase,
+      attempts: r.attempts,
+      waiting_for_ms: Date.now() - r.since,
+      error: r.lastError,
+    });
   });
+
+  // Everything below needs the database; answer honestly while it is coming up.
+  const requireReady = (_req: Request, res: Response, next: NextFunction) => {
+    if (!readiness || readiness.phase === 'ready') return next();
+    res.status(503).json({ error: 'starting up', phase: readiness.phase, detail: readiness.lastError });
+  };
 
   // ---------- MCP (stateless Streamable HTTP) ----------
   // Authorized either by the secret path (claude.ai custom connector, no headers possible)
@@ -87,7 +110,7 @@ export function createApp({ db, config, oura }: AppDeps) {
     });
   };
   for (const path of ['/mcp', '/mcp/:secret']) {
-    app.post(path, handleMcp);
+    app.post(path, requireReady, handleMcp);
     app.get(path, mcpMethodNotAllowed);
     app.delete(path, mcpMethodNotAllowed);
   }
@@ -148,12 +171,12 @@ export function createApp({ db, config, oura }: AppDeps) {
   });
 
   // ---------- Webhooks (Bearer API_TOKEN) ----------
-  app.post('/webhook/health-auto-export', requireApiToken, async (req, res) => {
+  app.post('/webhook/health-auto-export', requireApiToken, requireReady, async (req, res) => {
     const result = await ingestHealthAutoExport(db, req.body ?? {});
     res.json({ ok: true, ...result });
   });
 
-  app.post('/webhook/shortcut', requireApiToken, async (req, res) => {
+  app.post('/webhook/shortcut', requireApiToken, requireReady, async (req, res) => {
     const result = await ingestShortcut(db, req.body ?? {});
     res.json({ ok: true, ...result });
   });
@@ -161,6 +184,7 @@ export function createApp({ db, config, oura }: AppDeps) {
   // ---------- Small REST API for other clients (Telegram bot, dashboards) ----------
   const api = express.Router();
   api.use(requireApiToken);
+  api.use(requireReady);
 
   api.get('/day', async (req, res) => {
     const day = typeof req.query.date === 'string' && isDay(req.query.date) ? req.query.date : today();
