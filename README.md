@@ -62,7 +62,8 @@ A wrong secret returns 404 rather than 401, so the endpoint does not advertise i
 ### Hostinger VPS (Docker + Traefik template)
 
 Traefik already holds 80/443, so the app attaches to it with labels instead of
-running its own reverse proxy.
+running its own reverse proxy, and the panel pulls a finished image from GHCR
+rather than building anything (it deploys with `docker compose up -d`).
 
 1. hPanel → VPS → Docker Manager → **Compose** → **Compose from URL**:
    `https://raw.githubusercontent.com/wadadaaa/health-hub/main/docker-compose.hostinger.yml`

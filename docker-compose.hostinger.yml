@@ -26,9 +26,8 @@
 #     so the app attaches to it with labels.
 #
 #   * No `build:`. The panel deploys with `docker compose up -d` and does not
-#     build images, so the app runs on the stock node image and fetches its own
-#     source at startup. That costs an npm install on every container start and
-#     buys a deployment that needs no registry and no shell on the box.
+#     build images, so this pulls a finished one from GHCR, built by
+#     .github/workflows/image.yml on every push to main.
 #
 # For a plain VPS with a shell and nothing on 80/443, use docker-compose.yml:
 # it builds the Dockerfile and brings its own Caddy.
@@ -50,7 +49,12 @@ services:
       retries: 10
 
   app:
-    image: node:22-alpine
+    # Built by .github/workflows/image.yml on every push to main. The panel
+    # deploys with `docker compose up -d` and does not build, so the image is
+    # finished before it gets here: startup is a pull and a node process, with
+    # no git clone and no npm install in the way.
+    image: ghcr.io/wadadaaa/health-hub:main
+    pull_policy: always
     restart: unless-stopped
     depends_on:
       db:
@@ -67,20 +71,6 @@ services:
       OURA_CRON: ${OURA_CRON:-17 * * * *}
       OURA_BACKFILL_DAYS: ${OURA_BACKFILL_DAYS:-3}
       TZ_LOCAL: ${TZ_LOCAL:-Asia/Jerusalem}
-      SOURCE_REPO: ${SOURCE_REPO:-https://github.com/wadadaaa/health-hub.git}
-      SOURCE_REF: ${SOURCE_REF:-main}
-    working_dir: /srv
-    command:
-      - sh
-      - -ec
-      - |
-        apk add --no-cache git >/dev/null
-        rm -rf /srv/app
-        git clone --depth 1 --branch "$$SOURCE_REF" "$$SOURCE_REPO" /srv/app
-        cd /srv/app
-        npm ci --no-audit --no-fund
-        npm run build
-        exec node dist/index.js
     labels:
       - traefik.enable=true
       - traefik.http.routers.healthhub.rule=Host(`${APP_HOST:?set APP_HOST}`)
