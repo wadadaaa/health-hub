@@ -6,6 +6,8 @@ import { createApp } from './http.js';
 import type { TokenSource } from './ingest/oura.js';
 import { getAccessToken, type OuraOAuthConfig } from './oura-auth.js';
 import { createReadiness, keepTrying } from './readiness.js';
+import { getSetting } from './settings.js';
+import { setWebhook } from './telegram.js';
 
 const config = loadConfig();
 setTimezone(config.TZ_LOCAL);
@@ -29,7 +31,13 @@ const ouraTokenSource: TokenSource | null = ouraOAuth
 // Listen first. The database may still be starting, and a process that exits
 // here would restart-loop behind the proxy with nothing to read.
 const readiness = createReadiness();
-const app = createApp({ db: pool, config, oura: { oauth: ouraOAuth, tokenSource: ouraTokenSource }, readiness });
+const app = createApp({
+  db: pool,
+  config,
+  oura: { oauth: ouraOAuth, tokenSource: ouraTokenSource },
+  readiness,
+  publicUrl: config.PUBLIC_URL,
+});
 const server = app.listen(config.PORT, () => {
   console.log(`[http] listening on :${config.PORT}`);
   console.log(`[mcp] POST /mcp/<MCP_PATH_SECRET>  (claude.ai custom connector)`);
@@ -59,6 +67,22 @@ void keepTrying(readiness, async () => {
     startOuraCron(pool, ouraTokenSource, config.OURA_CRON, config.OURA_BACKFILL_DAYS, config.TZ_LOCAL);
     console.log(`[oura] cron "${config.OURA_CRON}" (${config.TZ_LOCAL})`);
   }
+
+  // Re-point Telegram at this deployment, in case the public URL changed.
+  void (async () => {
+    const [token, secret] = await Promise.all([
+      getSetting(pool, 'telegram_bot_token'),
+      getSetting(pool, 'telegram_webhook_secret'),
+    ]);
+    if (!token || !secret || !config.PUBLIC_URL) return;
+    const url = `${config.PUBLIC_URL.replace(/\/+$/, '')}/telegram/${secret}`;
+    try {
+      await setWebhook(token, url, secret);
+      console.log('[telegram] webhook registered');
+    } catch (e) {
+      console.error('[telegram] webhook registration failed:', e instanceof Error ? e.message : e);
+    }
+  })();
 });
 
 const shutdown = () => {

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { Config } from './config.js';
@@ -8,6 +8,8 @@ import { ingestHealthAutoExport, ingestShortcut } from './ingest/apple.js';
 import { ingestOura, type TokenSource } from './ingest/oura.js';
 import { completeFlow, startFlow, status as ouraStatus, type OuraOAuthConfig } from './oura-auth.js';
 import type { Readiness } from './readiness.js';
+import { describeSettings, getSetting, setSetting, type SettingKey } from './settings.js';
+import { handleUpdate, setWebhook } from './telegram.js';
 import { createMcpServer } from './mcp.js';
 import { getDay, getWeek, logMeal, weightTrend } from './service.js';
 
@@ -16,6 +18,8 @@ export interface AppDeps {
   config: Pick<Config, 'MCP_PATH_SECRET' | 'API_TOKEN'>;
   /** Startup state; the server listens before the database is reachable. */
   readiness?: Readiness;
+  /** Public origin, used to build the Telegram webhook URL. */
+  publicUrl?: string;
   /** Null when Oura has not been configured at all. */
   oura: {
     /** OAuth2 app credentials; null when only a legacy personal token is set. */
@@ -38,7 +42,7 @@ function bearer(req: Request): string | undefined {
   return m?.[1]?.trim();
 }
 
-export function createApp({ db, config, oura, readiness }: AppDeps) {
+export function createApp({ db, config, oura, readiness, publicUrl }: AppDeps) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -231,6 +235,73 @@ export function createApp({ db, config, oura, readiness }: AppDeps) {
 
   api.get('/oura/status', async (_req, res) => {
     res.json({ ...(await ouraStatus(db)), oauth_configured: oura.oauth !== null });
+  });
+
+  // ---------- Telegram ----------
+  // Two gates: the secret in the path, and the token Telegram echoes in a
+  // header. Both come from the same stored secret.
+  app.post('/telegram/:secret', async (req, res) => {
+    const expected = await getSetting(db, 'telegram_webhook_secret');
+    const headerToken = req.header('x-telegram-bot-api-secret-token');
+    if (!expected || !safeEqual(req.params.secret, expected) || !safeEqual(headerToken, expected)) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    // Answer immediately: Telegram retries anything slow, and the work can
+    // take a few seconds against the vision model.
+    res.json({ ok: true });
+
+    const token = await getSetting(db, 'telegram_bot_token');
+    if (!token) return;
+    const anthropicKey = await getSetting(db, 'anthropic_api_key');
+    void handleUpdate({ db, token, anthropicKey }, req.body ?? {});
+  });
+
+  api.get('/settings', async (_req, res) => {
+    res.json(await describeSettings(db));
+  });
+
+  const SETTABLE: SettingKey[] = [
+    'telegram_bot_token',
+    'telegram_webhook_secret',
+    'telegram_chat_id',
+    'anthropic_api_key',
+  ];
+
+  api.put('/settings', async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const unknown = Object.keys(body).filter(k => !SETTABLE.includes(k as SettingKey));
+    if (unknown.length) {
+      res.status(400).json({ error: `unknown settings: ${unknown.join(', ')}` });
+      return;
+    }
+    for (const [key, value] of Object.entries(body)) {
+      if (typeof value !== 'string' || !value) continue;
+      await setSetting(db, key as SettingKey, value);
+    }
+    res.json(await describeSettings(db));
+  });
+
+  /** Points Telegram at this server, minting a webhook secret when there is none. */
+  api.post('/telegram/register', async (_req, res) => {
+    const token = await getSetting(db, 'telegram_bot_token');
+    if (!token) {
+      res.status(400).json({ error: 'telegram_bot_token is not set' });
+      return;
+    }
+    const origin = publicUrl?.replace(/\/+$/, '');
+    if (!origin) {
+      res.status(400).json({ error: 'PUBLIC_URL is not configured' });
+      return;
+    }
+    let secret = await getSetting(db, 'telegram_webhook_secret');
+    if (!secret) {
+      secret = randomBytes(24).toString('hex');
+      await setSetting(db, 'telegram_webhook_secret', secret);
+    }
+    const url = `${origin}/telegram/${secret}`;
+    await setWebhook(token, url, secret);
+    res.json({ ok: true, url });
   });
 
   app.use('/api', api);

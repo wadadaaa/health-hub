@@ -158,6 +158,41 @@ Run it from an Automation on a schedule.
 Oura also writes into Apple Health, so Health Auto Export alone can cover both —
 but readiness scores only arrive through the Oura API.
 
+## Telegram bot
+
+Photos of food, or a sentence about one, become a logged meal and a reply with
+what is left for the day. The bot is part of this server rather than a separate
+service: same database, same budget arithmetic, one more way in.
+
+Its credentials live in the `settings` table rather than the environment, so
+they can be set over the API without redeploying:
+
+```bash
+curl -X PUT https://$DOMAIN/api/settings \
+  -H "Authorization: Bearer $API_TOKEN" -H 'content-type: application/json' \
+  -d '{"telegram_bot_token":"...","anthropic_api_key":"sk-ant-..."}'
+
+curl -X POST https://$DOMAIN/api/telegram/register \
+  -H "Authorization: Bearer $API_TOKEN"
+```
+
+`register` mints a webhook secret, points Telegram at
+`https://$DOMAIN/telegram/<secret>` and passes the same value as Telegram's
+`secret_token`, so the endpoint is gated twice. The server re-registers at
+startup in case the public URL changed.
+
+The first private chat to send `/start` is bound as the owner and every other
+chat is refused; `GET /api/settings` shows which credentials are set, never
+their values.
+
+What it understands: a photo (with an optional caption that sharpens the
+estimate), a sentence about what was eaten, `сколько осталось` or `/day`,
+`/week`, `вес 81.4`, and `/undo`.
+
+Estimates come from Claude with a single forced tool call, asked for the
+upper-middle of the plausible range — under-counting is the costly error when
+the point is a deficit.
+
 ## REST API (bearer `API_TOKEN`)
 
 ```
@@ -190,6 +225,8 @@ npm install
 npm test               # both suites below
 npm run test:smoke     # in-memory Postgres (pg-mem): MCP handshake, tools, webhooks, REST
 npm run test:oura      # Oura OAuth2: PKCE, single-use state, refresh rotation
+npm run test:readiness # startup retry, and what /healthz says while the db is down
+npm run test:telegram  # bot pairing, photo and text meals, queries, /undo
 npm run dev            # needs DATABASE_URL and the secrets in the environment
 npm run build
 ```
@@ -198,6 +235,5 @@ npm run build
 
 - OAuth 2.1 in front of `/mcp` (the SDK ships `mcpAuthRouter`), to drop the
   secret from the path.
-- A Telegram bot on top of `/api/*`.
 - A weekly dashboard over `/api/week`.
 - A nightly job that posts the day's summary.
