@@ -187,7 +187,13 @@ their values.
 
 What it understands: a photo (with an optional caption that sharpens the
 estimate), a sentence about what was eaten, `сколько осталось` or `/day`,
-`/week`, `вес 81.4`, and `/undo`.
+`что съесть` or `/eat`, `/week`, `вес 81.4`, and `/undo`.
+
+`/eat` is the other direction: instead of pricing what was eaten it reads the
+day — what is left, what has been eaten, what the ring saw — and asks Claude
+for two or three concrete things to eat that fit, in prose rather than a tool
+call. It is told that protein is usually the gap and fat usually overspent, and
+to say so plainly when the kcal left cannot cover the protein left.
 
 Every reply carries the day's remainder and, under it, what the ring reported:
 active energy, steps, workout minutes, sleep and readiness. When activity has

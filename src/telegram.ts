@@ -9,6 +9,7 @@
 import type { Queryable } from './db.js';
 import { estimateFromPhoto, estimateFromText, EstimateError, type MealEstimate } from './estimate.js';
 import { getSetting, setSetting } from './settings.js';
+import { suggestFood, SuggestError } from './suggest.js';
 import { deleteMeal, getDay, getWeek, listMeals, logMeal, logWeight, type DaySummary } from './service.js';
 
 const API = 'https://api.telegram.org';
@@ -89,7 +90,7 @@ function metricsLine(day: DaySummary): string | null {
   if (m.sleep_min != null) parts.push(`сон ${hhmm(m.sleep_min)}`);
   if (m.readiness != null) parts.push(`готовность ${Math.round(m.readiness)}`);
   if (!parts.length) return null;
-  return `<i>${parts.join(' · ')}</i>`;
+  return `💍 <i>${parts.join(' · ')}</i>`;
 }
 
 function dayLine(day: DaySummary): string {
@@ -97,9 +98,9 @@ function dayLine(day: DaySummary): string {
   const over = r.kcal < 0;
   const lines = [
     over
-      ? `<b>Перебор на ${Math.abs(r.kcal)} ккал</b> (бюджет ${budgetText(day)}, съедено ${day.consumed.kcal})`
-      : `<b>Осталось ${r.kcal} ккал</b> из ${budgetText(day)} (съедено ${day.consumed.kcal})`,
-    `Белок ${r1(r.protein_g)} г · жиры ${r1(r.fat_g)} г · углеводы ${r1(r.carbs_g)} г`,
+      ? `⚠️ <b>Перебор на ${Math.abs(r.kcal)} ккал</b> (бюджет ${budgetText(day)}, съедено ${day.consumed.kcal})`
+      : `🔥 <b>Осталось ${r.kcal} ккал</b> из ${budgetText(day)} (съедено ${day.consumed.kcal})`,
+    `🥩 ${r1(r.protein_g)} г белка · 🧈 ${r1(r.fat_g)} г жиров · 🍞 ${r1(r.carbs_g)} г углеводов`,
   ];
   const metrics = metricsLine(day);
   if (metrics) lines.push(metrics);
@@ -108,10 +109,10 @@ function dayLine(day: DaySummary): string {
 
 function mealReply(est: MealEstimate, day: DaySummary, id: number): string {
   const lines = [
-    `Записала: <b>${est.description}</b>`,
+    `📝 Записала: <b>${est.description}</b>`,
     `${est.kcal} ккал · Б ${r1(est.protein_g)} · Ж ${r1(est.fat_g)} · У ${r1(est.carbs_g)}`,
   ];
-  if (est.confidence === 'low') lines.push('<i>Оценка грубая — напиши состав или вес, уточню.</i>');
+  if (est.confidence === 'low') lines.push('🤔 <i>Оценка грубая — напиши состав или вес, уточню.</i>');
   if (est.note) lines.push(`<i>${est.note}</i>`);
   lines.push('', dayLine(day));
   lines.push(`<i>/undo — удалить (#${id})</i>`);
@@ -120,17 +121,22 @@ function mealReply(est: MealEstimate, day: DaySummary, id: number): string {
 
 const HELP = [
   'Что умею:',
-  '• <b>фото еды</b> — оценю и запишу; подпись с деталями («без масла», «300 г») уточняет оценку',
-  '• <b>текстом</b>: «тарелка овсянки с бананом» — то же самое, без фото',
-  '• <b>«сколько осталось»</b> или /day — остаток на сегодня',
-  '• <b>/week</b> — неделя и динамика веса',
-  '• <b>«вес 81.4»</b> — записать взвешивание',
-  '• <b>/undo</b> — удалить последнюю запись',
+  '📸 <b>фото еды</b> — оценю и запишу; подпись с деталями («без масла», «300 г») уточняет оценку',
+  '✍️ <b>текстом</b>: «тарелка овсянки с бананом» — то же самое, без фото',
+  '🔥 <b>«сколько осталось»</b> или /day — остаток на сегодня',
+  '🍽 <b>«что съесть»</b> или /eat — что взять на оставшийся бюджет',
+  '📊 <b>/week</b> — неделя и динамика веса',
+  '⚖️ <b>«вес 81.4»</b> — записать взвешивание',
+  '🗑 <b>/undo</b> — удалить последнюю запись',
 ].join('\n');
 
 // ---------- routing ----------
 
 const ASK_REMAINING = /(скольк|остал|остаток|бюджет|сегодня)/i;
+// Asking for advice, not describing a meal: "что съесть", "посоветуй что-нибудь",
+// "чем поужинать". Anchored on the question so "съел салат" still logs a salad.
+const ASK_WHAT_TO_EAT =
+  /(^|\s)(что|чего|чем)\s+(\S+\s+){0,2}(съесть|поесть|покушать|пожрать|заказать|приготовить|поужинать|пообедать|позавтракать)|посовету|что\s+(на|для)\s+(ужин|обед|завтрак)/i;
 const WEIGHT = /^\s*(?:вес|weight)\s*[:=]?\s*(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:кг|kg)?\s*$/i;
 
 export interface TelegramDeps {
@@ -151,7 +157,7 @@ export async function handleUpdate(deps: TelegramDeps, update: TgUpdate): Promis
   if (!owner) {
     if (!(msg.text ?? '').startsWith('/start')) return;
     await setSetting(db, 'telegram_chat_id', String(chatId));
-    await send(token, chatId, `Привет! Бот привязан к этому чату.\n\n${HELP}`);
+    await send(token, chatId, `👋 Привет! Бот привязан к этому чату.\n\n${HELP}`);
     return;
   }
   if (String(chatId) !== owner) {
@@ -164,7 +170,7 @@ export async function handleUpdate(deps: TelegramDeps, update: TgUpdate): Promis
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.error('[telegram]', message);
-    await send(token, chatId, `Не получилось: ${message.slice(0, 300)}`);
+    await send(token, chatId, `❌ Не получилось: ${message.slice(0, 300)}`);
   }
 }
 
@@ -191,6 +197,18 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
 
   if (text.startsWith('/start') || text.startsWith('/help')) {
     await send(token, chatId, HELP);
+    return;
+  }
+
+  if (text.startsWith('/eat') || ASK_WHAT_TO_EAT.test(text)) {
+    if (!anthropicKey) {
+      await send(token, chatId, 'Совет не соберу: на сервере не задан ключ Anthropic API.');
+      return;
+    }
+    await tg(token, 'sendChatAction', { chat_id: chatId, action: 'typing' });
+    const day = await getDay(db);
+    const advice = await suggestFood(anthropicKey, day, text.replace(/^\/eat\s*/i, ''));
+    await send(token, chatId, `🍽 <b>На оставшийся бюджет</b>\n${advice}\n\n${dayLine(day)}`);
     return;
   }
 
@@ -221,7 +239,7 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
             w.delta_week != null ? ` (${w.delta_week > 0 ? '+' : ''}${w.delta_week} за неделю)` : ''
           }`
         : '';
-    await send(token, chatId, `<b>Неделя</b>\n${rows}${trend}`);
+    await send(token, chatId, `📊 <b>Неделя</b>\n${rows}${trend}`);
     return;
   }
 
@@ -233,7 +251,7 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
       return;
     }
     await deleteMeal(db, last.id);
-    await send(token, chatId, `Удалила: ${last.description} (−${last.kcal} ккал)\n\n${dayLine(await getDay(db))}`);
+    await send(token, chatId, `🗑 Удалила: ${last.description} (−${last.kcal} ккал)\n\n${dayLine(await getDay(db))}`);
     return;
   }
 
@@ -241,7 +259,7 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
   if (weight) {
     const kg = Number(weight[1].replace(',', '.'));
     await logWeight(db, kg, new Date(), 'telegram');
-    await send(token, chatId, `Записала вес ${kg} кг.`);
+    await send(token, chatId, `⚖️ Записала вес ${kg} кг.`);
     return;
   }
 
@@ -255,4 +273,4 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
   await send(token, chatId, mealReply(est, await getDay(db), meal.id));
 }
 
-export { EstimateError };
+export { EstimateError, SuggestError };

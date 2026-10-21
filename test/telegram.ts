@@ -25,6 +25,7 @@ const KEY = 'anthropic-key';
 
 // --- stub the two outside services ---
 const sent: { method: string; body: Record<string, unknown> }[] = [];
+const askedFor: string[] = [];
 let estimate = { description: 'Овсянка с бананом', kcal: 420, protein_g: 12, fat_g: 8, carbs_g: 72, confidence: 'medium' as const };
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
@@ -37,6 +38,12 @@ globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
   }
   if (u.startsWith('https://api.telegram.org/file/')) return new Response(Buffer.from('jpegbytes'));
   if (u === 'https://api.anthropic.com/v1/messages') {
+    const body = JSON.parse(String(init?.body ?? '{}')) as { tools?: unknown[]; messages: { content: string }[] };
+    // The estimator forces a tool call; the adviser wants prose.
+    if (!body.tools) {
+      askedFor.push(body.messages[0].content);
+      return json({ content: [{ type: 'text', text: '• 200 г творога 0% — 180 ккал, 36 г белка' }] });
+    }
     return json({ content: [{ type: 'tool_use', name: 'log_meal', input: estimate }] });
   }
   throw new Error(`unexpected fetch ${u}`);
@@ -130,6 +137,29 @@ try {
   assert.match(lastText(), /9\.1к/, 'the week shows steps');
   assert.match(lastText(), /R79/, 'the week shows readiness');
   console.log('oura metrics ok');
+
+  // 10. Advice: the day goes to the model, the answer comes back with the
+  //     remainder under it, and nothing is logged as a meal.
+  const mealsBefore = (await listMeals(db, today())).length;
+  await handleUpdate(deps, message({ text: 'что мне съесть?' }));
+  assert.equal((await listMeals(db, today())).length, mealsBefore, 'a question is not a meal');
+  assert.match(lastText(), /На оставшийся бюджет/);
+  assert.match(lastText(), /творога 0%/);
+  assert.match(lastText(), /Осталось/, 'the remainder comes with the advice');
+  assert.match(askedFor.at(-1)!, /Left: /, 'the model is told what is left');
+  assert.match(askedFor.at(-1)!, /readiness 79/, 'and what the ring saw');
+
+  await handleUpdate(deps, message({ text: '/eat' }));
+  assert.match(lastText(), /На оставшийся бюджет/);
+
+  // "сегодня" also matches the remainder question; advice must win.
+  await handleUpdate(deps, message({ text: 'что сегодня поесть на ужин?' }));
+  assert.match(lastText(), /На оставшийся бюджет/, 'advice wins over the remainder question');
+
+  // A sentence about eating is still a meal, not a question.
+  await handleUpdate(deps, message({ text: 'съела тарелку овсянки' }));
+  assert.equal((await listMeals(db, today())).length, mealsBefore + 1, 'a described meal is logged');
+  console.log('advice ok');
 
   console.log('\nTELEGRAM TEST PASSED');
 } finally {
