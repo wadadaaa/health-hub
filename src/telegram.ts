@@ -68,16 +68,42 @@ export async function setWebhook(token: string, url: string, secret: string): Pr
 // ---------- replies ----------
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
+const hhmm = (min: number) => `${Math.floor(min / 60)}:${String(Math.round(min) % 60).padStart(2, '0')}`;
+
+/** "1500", or "1569 (1500 + 69 за активность)" when the ring earned a bonus. */
+function budgetText(day: DaySummary): string {
+  const b = day.budget;
+  return b.extra > 0 ? `${b.adjusted} (${b.base} + ${b.extra} за активность)` : String(b.adjusted);
+}
+
+/**
+ * What the wearables say about the day. The budget already reflects the
+ * activity; this is so the number is not a figure out of nowhere.
+ */
+function metricsLine(day: DaySummary): string | null {
+  const m = day.metrics;
+  const parts: string[] = [];
+  if (m.active_kcal != null) parts.push(`актив. ${Math.round(m.active_kcal)} ккал`);
+  if (m.steps != null) parts.push(`${Math.round(m.steps)} шагов`);
+  if (m.workout_min) parts.push(`трен. ${Math.round(m.workout_min)} мин`);
+  if (m.sleep_min != null) parts.push(`сон ${hhmm(m.sleep_min)}`);
+  if (m.readiness != null) parts.push(`готовность ${Math.round(m.readiness)}`);
+  if (!parts.length) return null;
+  return `<i>${parts.join(' · ')}</i>`;
+}
 
 function dayLine(day: DaySummary): string {
   const r = day.remaining;
   const over = r.kcal < 0;
-  return [
+  const lines = [
     over
-      ? `<b>Перебор на ${Math.abs(r.kcal)} ккал</b> (бюджет ${day.budget.adjusted}, съедено ${day.consumed.kcal})`
-      : `<b>Осталось ${r.kcal} ккал</b> из ${day.budget.adjusted} (съедено ${day.consumed.kcal})`,
+      ? `<b>Перебор на ${Math.abs(r.kcal)} ккал</b> (бюджет ${budgetText(day)}, съедено ${day.consumed.kcal})`
+      : `<b>Осталось ${r.kcal} ккал</b> из ${budgetText(day)} (съедено ${day.consumed.kcal})`,
     `Белок ${r1(r.protein_g)} г · жиры ${r1(r.fat_g)} г · углеводы ${r1(r.carbs_g)} г`,
-  ].join('\n');
+  ];
+  const metrics = metricsLine(day);
+  if (metrics) lines.push(metrics);
+  return lines.join('\n');
 }
 
 function mealReply(est: MealEstimate, day: DaySummary, id: number): string {
@@ -177,8 +203,16 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
 
   if (text.startsWith('/week')) {
     const week = await getWeek(db);
+    // Narrow enough for a phone: date, kcal, protein, steps in thousands,
+    // readiness. Protein and readiness are the two that a kcal total hides.
     const rows = week.days
-      .map(d => `${d.day.slice(5)} ${d.meals ? `${d.consumed}/${d.budget}` : '—'}`)
+      .map(d => {
+        const cells = [d.day.slice(5), d.meals ? `${d.consumed}/${d.budget}` : '—'];
+        if (d.meals) cells.push(`Б${Math.round(d.protein_g)}`);
+        if (d.steps != null) cells.push(`${r1(d.steps / 1000)}к`);
+        if (d.readiness != null) cells.push(`R${Math.round(d.readiness)}`);
+        return cells.join(' ');
+      })
       .join('\n');
     const w = week.weight;
     const trend =

@@ -9,7 +9,7 @@ import { migrate, type Queryable } from '../src/db.js';
 import { setTimezone } from '../src/dates.js';
 import { getSetting, invalidate, setSetting } from '../src/settings.js';
 import { handleUpdate } from '../src/telegram.js';
-import { listMeals, weightTrend } from '../src/service.js';
+import { listMeals, upsertMetrics, weightTrend } from '../src/service.js';
 import { today } from '../src/dates.js';
 
 setTimezone('Asia/Jerusalem');
@@ -107,6 +107,29 @@ try {
   await handleUpdate(deps, { message: { message_id: 9, chat: { id: -100, type: 'supergroup' }, text: '/start' } });
   assert.equal(sent.length, before, 'no reply in groups');
   console.log('guards ok');
+
+  // 9. Oura's numbers reach the reply: they raise the budget, and the day
+  //    line says what they were, so the figure is not out of nowhere.
+  await upsertMetrics(db, today(), 'oura', {
+    active_kcal: 500,
+    steps: 9100,
+    sleep_min: 411,
+    readiness: 79,
+    workout_min: 35,
+  });
+  await handleUpdate(deps, message({ text: '/day' }));
+  const withRing = lastText();
+  assert.match(withRing, /1620 \(1500 \+ 120 за активность\)/, 'budget shows the activity bonus');
+  assert.match(withRing, /актив\. 500 ккал/);
+  assert.match(withRing, /9100 шагов/);
+  assert.match(withRing, /трен\. 35 мин/);
+  assert.match(withRing, /сон 6:51/);
+  assert.match(withRing, /готовность 79/);
+
+  await handleUpdate(deps, message({ text: '/week' }));
+  assert.match(lastText(), /9\.1к/, 'the week shows steps');
+  assert.match(lastText(), /R79/, 'the week shows readiness');
+  console.log('oura metrics ok');
 
   console.log('\nTELEGRAM TEST PASSED');
 } finally {

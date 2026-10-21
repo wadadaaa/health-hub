@@ -189,9 +189,17 @@ What it understands: a photo (with an optional caption that sharpens the
 estimate), a sentence about what was eaten, `сколько осталось` or `/day`,
 `/week`, `вес 81.4`, and `/undo`.
 
+Every reply carries the day's remainder and, under it, what the ring reported:
+active energy, steps, workout minutes, sleep and readiness. When activity has
+raised the budget the line says so (`1620 (1500 + 120 за активность)`), so the
+number is never a figure out of nowhere.
+
 Estimates come from Claude with a single forced tool call, asked for the
 upper-middle of the plausible range — under-counting is the costly error when
-the point is a deficit.
+the point is a deficit. The prompt insists on adding what sits on top of a dish
+rather than naming it: granola on a yogurt, cream on a pastry, dressing on a
+salad. A nutrition label on a package covers the package only; anything added
+to it is counted on top.
 
 ## REST API (bearer `API_TOKEN`)
 
