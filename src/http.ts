@@ -1,6 +1,7 @@
 import { composeBriefing } from './briefing.js';
 import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
+import { calibration, listFacts } from './memory.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -216,6 +217,14 @@ export function createApp({ db, config, oura, readiness, publicUrl }: AppDeps) {
   api.get('/insights', async (req, res) => {
     const days = Math.min(120, Math.max(7, Number(req.query.days ?? 28) || 28));
     res.json(await insights(db, days));
+  });
+
+  api.get('/facts', async (_req, res) => {
+    res.json({ facts: await listFacts(db) });
+  });
+
+  api.get('/calibration', async (_req, res) => {
+    res.json(await calibration(db));
   });
 
   api.get('/briefing', async (_req, res) => {

@@ -1,4 +1,5 @@
 import type { Queryable } from './db.js';
+import { recordCorrection } from './memory.js';
 import { dayRange, dbDay, dbInstant, localDay, shiftDay, today } from './dates.js';
 
 // ---------- types ----------
@@ -176,12 +177,33 @@ export async function updateMeal(db: Queryable, id: number, patch: UpdateMealInp
     push('day', localDay(patch.eaten_at));
   }
   if (sets.length === 0) return getMeal(db, id);
+
+  // Read the row first: being wrong is the thing worth recording, and the
+  // only moment it can be seen is between the before and the after.
+  const before = await getMeal(db, id);
+
   params.push(id);
   const { rows } = await db.query(
     `UPDATE meals SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING ${MEAL_COLS}`,
     params,
   );
-  return rows[0] ? toMeal(rows[0]) : null;
+  const after = rows[0] ? toMeal(rows[0]) : null;
+
+  if (before && after) {
+    // Never let bookkeeping break the edit itself.
+    try {
+      await recordCorrection(db, {
+        meal_id: after.id,
+        day: after.day,
+        description: after.description,
+        before: { kcal: before.kcal, protein_g: before.protein_g, fat_g: before.fat_g, carbs_g: before.carbs_g },
+        after: { kcal: after.kcal, protein_g: after.protein_g, fat_g: after.fat_g, carbs_g: after.carbs_g },
+      });
+    } catch (e) {
+      console.error('[corrections] not recorded:', e instanceof Error ? e.message : e);
+    }
+  }
+  return after;
 }
 
 export async function getMeal(db: Queryable, id: number): Promise<Meal | null> {

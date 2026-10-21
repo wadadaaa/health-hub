@@ -13,6 +13,7 @@ import type { Queryable } from './db.js';
 import { timezone, today } from './dates.js';
 import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
+import { calibration, forget, learnedPrompt, listFacts, recallMeals, remember } from './memory.js';
 import {
   deleteMeal,
   getDay,
@@ -135,6 +136,53 @@ const TOOLS = [
     input_schema: { type: 'object', properties: { days: { type: 'number' } }, required: [] },
   },
   {
+    name: 'recall_meals',
+    description:
+      'Past meals whose description resembles a query, with what they came to and how often they recurred. Call this ' +
+      'BEFORE estimating anything that might be a repeat — a named dish, a usual place, "как обычно", "как вчера". ' +
+      'A dish she has eaten before should be priced from its own history, not from scratch.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The dish, in any language, as she or the photo describes it.' },
+        limit: { type: 'number' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'remember',
+    description:
+      'Store a durable fact about her under a short key: a standing constraint, an allergy, where she usually eats, ' +
+      'a goal, a preference. Writing an existing key replaces it. Only things that will still be true next month — ' +
+      'what she ate today is a meal, not a fact.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Short slug, e.g. "обед по будням" or "не ест".' },
+        value: { type: 'string' },
+      },
+      required: ['key', 'value'],
+    },
+  },
+  {
+    name: 'forget_fact',
+    description: 'Remove a stored fact by key. Use when she says it is no longer true.',
+    input_schema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] },
+  },
+  {
+    name: 'list_facts',
+    description: 'Everything currently remembered about her, for when she asks what you know.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'calibration',
+    description:
+      'What her corrections say about your own accuracy by food category: the median ratio between your first ' +
+      'estimate and the corrected one, with the sample size. Ignore categories where reportable is false.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
     name: 'energy_balance',
     description:
       'What the body actually spends, measured from logged intake and the weight trend rather than assumed by a ' +
@@ -202,6 +250,16 @@ async function runTool(db: Queryable, name: string, a: Record<string, unknown>):
     }
     case 'weight_trend':
       return weightTrend(db, Number(a.days ?? 28));
+    case 'recall_meals':
+      return { meals: await recallMeals(db, String(a.query), Number(a.limit ?? 5)) };
+    case 'remember':
+      return { fact: await remember(db, String(a.key), String(a.value)) };
+    case 'forget_fact':
+      return { forgotten: await forget(db, String(a.key)) };
+    case 'list_facts':
+      return { facts: await listFacts(db) };
+    case 'calibration':
+      return calibration(db);
     case 'energy_balance':
       return energyBalance(db, Number(a.days ?? 28));
     case 'insights':
@@ -215,13 +273,16 @@ async function runTool(db: Queryable, name: string, a: Record<string, unknown>):
 
 // ---------- the prompt ----------
 
-function system(): string {
+async function system(db: Queryable): Promise<string> {
+  const learned = await learnedPrompt(db);
   return [
     'You are the health-hub bot in a private Telegram chat with one person, who is tracking a calorie budget to lose',
     `weight. Today is ${today()} (${timezone()}). Answer in Russian, briefly — this is read on a phone.`,
     '',
     'WHAT YOU DO',
     'A photo of food, or a sentence about one, is a meal to log: work out what it is, estimate it, and call log_meal.',
+    'Check recall_meals first whenever it might be a repeat — a named dish, a usual place, "как обычно". Her own',
+    'history is better evidence than your guess, and most of what she eats, she has eaten before.',
     'A question is a question — answer it and log nothing. A correction of something already logged is update_meal on',
     'that id, never a second meal. You have the conversation so far: use it. "Как вчера" means look up yesterday with',
     'list_meals rather than guessing, and "без масла" means fix the estimate you just made.',
@@ -255,6 +316,7 @@ function system(): string {
     'Russian, and short — a few lines. Telegram HTML only: <b>, <i>, <code>. No markdown, no headings, no tables.',
     'After logging or changing a meal, give the numbers and what is left for the day. Do not round down to be kind and',
     'do not cheer. Say when an estimate is shaky and what would sharpen it.',
+    ...(learned ? ['', learned] : []),
   ].join('\n');
 }
 
@@ -271,7 +333,7 @@ interface ApiResponse {
   stop_reason?: string;
 }
 
-async function callApi(apiKey: string, messages: Turn[]): Promise<ApiResponse> {
+async function callApi(apiKey: string, systemPrompt: string, messages: Turn[]): Promise<ApiResponse> {
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: {
@@ -283,7 +345,7 @@ async function callApi(apiKey: string, messages: Turn[]): Promise<ApiResponse> {
       model: MODEL,
       max_tokens: MAX_TOKENS,
       thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
-      system: system(),
+      system: systemPrompt,
       tools: TOOLS,
       messages,
     }),
@@ -302,12 +364,12 @@ async function callApi(apiKey: string, messages: Turn[]): Promise<ApiResponse> {
  */
 export async function respond(deps: AgentDeps, userContent: Block[]): Promise<string> {
   const { db, apiKey, chatId } = deps;
-  const history = await loadHistory(db, chatId);
+  const [history, systemPrompt] = await Promise.all([loadHistory(db, chatId), system(db)]);
   const messages: Turn[] = [...history, { role: 'user', content: userContent }];
 
   let reply = '';
   for (let step = 0; step < MAX_STEPS; step++) {
-    const res = await callApi(apiKey, messages);
+    const res = await callApi(apiKey, systemPrompt, messages);
     const content = res.content ?? [];
     // The assistant turn goes back verbatim, thinking blocks included: the API
     // rejects a tool result whose thinking has been stripped.

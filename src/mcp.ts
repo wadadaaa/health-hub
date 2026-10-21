@@ -15,6 +15,7 @@ import {
 } from './service.js';
 import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
+import { calibration, forget, listFacts, recallMeals, remember } from './memory.js';
 import { ingestOura, type TokenSource } from './ingest/oura.js';
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] });
@@ -37,6 +38,65 @@ export interface McpDeps {
  */
 export function createMcpServer({ db, ouraTokenSource }: McpDeps): McpServer {
   const server = new McpServer({ name: 'health-hub', version: '0.1.0' });
+
+  server.registerTool(
+    'recall_meals',
+    {
+      title: 'Find past meals like this one',
+      description:
+        'Past meals whose description resembles the query, with what they came to and how often they recurred. ' +
+        'Call this before estimating anything that might be a repeat: her own history beats a fresh guess.',
+      inputSchema: {
+        query: z.string().min(1).describe('The dish, in any language'),
+        limit: z.number().int().min(1).max(10).default(5),
+      },
+    },
+    async ({ query, limit }) => json({ meals: await recallMeals(db, query, limit) })
+  );
+
+  server.registerTool(
+    'remember',
+    {
+      title: 'Store a durable fact',
+      description:
+        'Keep a fact about the person under a short key — a constraint, an allergy, where she usually eats, a goal. ' +
+        'Only what will still be true next month.',
+      inputSchema: { key: z.string().min(1).max(80), value: z.string().min(1).max(400) },
+    },
+    async ({ key, value }) => json({ fact: await remember(db, key, value) }),
+  );
+
+  server.registerTool(
+    'forget_fact',
+    {
+      title: 'Remove a stored fact',
+      description: 'Delete a remembered fact by key.',
+      inputSchema: { key: z.string().min(1) },
+    },
+    async ({ key }) => json({ forgotten: await forget(db, key) }),
+  );
+
+  server.registerTool(
+    'list_facts',
+    {
+      title: 'Everything remembered',
+      description: 'The durable facts kept about the person.',
+      inputSchema: {},
+    },
+    async () => json({ facts: await listFacts(db) }),
+  );
+
+  server.registerTool(
+    'calibration',
+    {
+      title: 'Estimate accuracy by food category',
+      description:
+        'What her corrections say about the estimates: median ratio of corrected to original by category, with ' +
+        'sample sizes. Ignore categories where reportable is false.',
+      inputSchema: {},
+    },
+    async () => json(await calibration(db)),
+  );
 
   server.registerTool(
     'energy_balance',

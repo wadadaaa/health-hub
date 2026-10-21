@@ -46,7 +46,8 @@ lands on the day you'd expect.
 
 `log_meal`, `update_meal`, `delete_meal`, `get_day`, `get_week`, `log_weight`,
 `weight_trend`, `get_targets`, `set_targets`, `sync_oura`, `energy_balance`,
-`insights`.
+`insights`, `recall_meals`, `remember`, `forget_fact`, `list_facts`,
+`calibration`.
 
 Two endpoints serve them:
 
@@ -215,6 +216,36 @@ The first private chat to send `/start` is bound as the owner and every other
 chat is refused; `GET /api/settings` shows which credentials are set, never
 their values.
 
+## What it remembers
+
+The model's weights never move; what improves is what the database can hand it.
+Three things are kept, and they are different in kind.
+
+**Facts** — durable sentences about the person under short keys: a standing
+constraint, an allergy, where lunch usually comes from, a goal. Written through
+`remember`, read into the system prompt every turn. Capped at 60, because a
+fact list that needs scrolling is a document, not a memory.
+
+**The food dictionary** — `recall_meals` scores past descriptions against a
+query by word overlap and collapses repeats into one line with a count. Most of
+what one person eats, they have eaten before, so a named dish should be priced
+from its own history rather than guessed again from a photo. Deliberately
+computed in JavaScript over a bounded window rather than with a trigram index:
+the corpus is one person's meals, and keeping it out of SQL keeps the in-memory
+test database honest.
+
+**The correction log** — every edit to a meal writes its before and after, with
+a crude food category. `calibration` returns the median ratio of corrected to
+original per category, and the system prompt carries the ones that clear eight
+corrections and a 12% bias: *"выпечка и десерты: your first estimate was
+corrected by ×1.5 (median of 10) — you read this kind of food low."* Below that
+threshold nothing is said, because five corrections is one bad lunch rather than
+a pattern. A reworded description with the same calories is not a correction and
+is not logged.
+
+None of this is learning in the sense people usually mean. It is the database
+remembering on the model's behalf, which for repeated meals is the useful kind.
+
 ## Measured expenditure
 
 A calorie target is normally a formula: a guess at resting metabolism times a
@@ -260,6 +291,8 @@ GET  /api/weight?days=28
 GET  /api/energy?days=28
 GET  /api/insights?days=28
 GET  /api/briefing
+GET  /api/facts
+GET  /api/calibration
 POST /api/meals        { description, kcal, protein_g?, fat_g?, carbs_g?, confidence?, eaten_at?, source? }
 POST /api/ingest/oura?days=3
 ```
@@ -289,6 +322,7 @@ npm run test:oura      # Oura OAuth2: PKCE, single-use state, refresh rotation
 npm run test:readiness # startup retry, and what /healthz says while the db is down
 npm run test:telegram  # bot pairing, photo and text meals, queries, /undo
 npm run test:energy    # measured expenditure, the splits, and what they refuse to say
+npm run test:memory    # facts, the food dictionary, and the correction log
 npm run dev            # needs DATABASE_URL and the secrets in the environment
 npm run build
 ```
