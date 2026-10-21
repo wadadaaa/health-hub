@@ -1,16 +1,18 @@
 /**
- * The bot's routing, against an in-memory Postgres with Telegram and the
- * Anthropic API stubbed.
+ * The bot end to end, against an in-memory Postgres with Telegram and the
+ * Anthropic API stubbed. The stub plays the part of the model: it is handed
+ * the request and answers with whatever blocks the script says, so the tool
+ * loop, the history and the commands are all exercised for real.
  *   npx tsx test/telegram.ts
  */
 import assert from 'node:assert/strict';
 import { newDb } from 'pg-mem';
+import { loadHistory } from '../src/agent.js';
 import { migrate, type Queryable } from '../src/db.js';
-import { setTimezone } from '../src/dates.js';
+import { setTimezone, today } from '../src/dates.js';
 import { getSetting, invalidate, setSetting } from '../src/settings.js';
 import { handleUpdate } from '../src/telegram.js';
 import { listMeals, upsertMetrics, weightTrend } from '../src/service.js';
-import { today } from '../src/dates.js';
 
 setTimezone('Asia/Jerusalem');
 
@@ -25,98 +27,144 @@ const KEY = 'anthropic-key';
 
 // --- stub the two outside services ---
 const sent: { method: string; body: Record<string, unknown> }[] = [];
-const askedFor: string[] = [];
-let estimate = { description: 'Овсянка с бананом', kcal: 420, protein_g: 12, fat_g: 8, carbs_g: 72, confidence: 'medium' as const };
+/** Each request to the model consumes one scripted reply. */
+let script: { content: unknown[] }[] = [];
+const seen: { system: string; messages: any[]; thinking?: unknown; tools?: unknown[] }[] = [];
+
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
   const u = String(url);
+  if (u.startsWith('https://api.telegram.org/file/')) return new Response(Buffer.from('jpegbytes'));
   if (u.startsWith('https://api.telegram.org/')) {
     const method = u.split('/').pop()!;
     sent.push({ method, body: JSON.parse(String(init?.body ?? '{}')) });
     if (method === 'getFile') return json({ ok: true, result: { file_path: 'photos/x.jpg' } });
     return json({ ok: true, result: {} });
   }
-  if (u.startsWith('https://api.telegram.org/file/')) return new Response(Buffer.from('jpegbytes'));
   if (u === 'https://api.anthropic.com/v1/messages') {
-    const body = JSON.parse(String(init?.body ?? '{}')) as { tools?: unknown[]; messages: { content: string }[] };
-    // The estimator forces a tool call; the adviser wants prose.
-    if (!body.tools) {
-      askedFor.push(body.messages[0].content);
-      return json({ content: [{ type: 'text', text: '• 200 г творога 0% — 180 ккал, 36 г белка' }] });
-    }
-    return json({ content: [{ type: 'tool_use', name: 'log_meal', input: estimate }] });
+    seen.push(JSON.parse(String(init?.body ?? '{}')));
+    const next = script.shift();
+    assert.ok(next, 'the model was called more times than the script expected');
+    return json(next);
   }
   throw new Error(`unexpected fetch ${u}`);
 }) as typeof fetch;
+
 function json(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 }
-const deps = { db, token: TOKEN, anthropicKey: KEY };
-const lastText = () => String(sent.filter(s => s.method === 'sendMessage').at(-1)!.body.text);
-const message = (over: Record<string, unknown>) => ({
-  message: { message_id: 1, chat: { id: 777, type: 'private' }, ...over },
+
+const text = (t: string) => ({ content: [{ type: 'text', text: t }] });
+const toolCall = (name: string, input: unknown, id = 'tu_1') => ({
+  content: [
+    { type: 'thinking', thinking: 'let me look', signature: 'sig' },
+    { type: 'tool_use', id, name, input },
+  ],
 });
 
+const lastText = () =>
+  String([...sent].reverse().find(s => s.method === 'sendMessage')!.body.text);
+
+let seq = 10;
+const message = (over: Record<string, unknown>) => ({
+  message: { message_id: seq++, chat: { id: 777, type: 'private' }, ...over },
+});
+
+const deps = { db, token: TOKEN, anthropicKey: KEY };
+
 try {
-  // 1. The first /start binds the chat.
+  // 1. Nothing is bound yet: a stranger's chatter is ignored.
+  await handleUpdate(deps, message({ text: 'привет' }));
+  assert.equal(sent.length, 0);
+  assert.equal(await getSetting(db, 'telegram_chat_id'), null);
+
+  // 2. /start claims the bot.
   await handleUpdate(deps, message({ text: '/start' }));
   assert.equal(await getSetting(db, 'telegram_chat_id'), '777');
-  assert.match(lastText(), /привязан/i);
-
-  // 2. Another chat is refused, and binding does not move.
-  await handleUpdate(deps, { message: { message_id: 2, chat: { id: 999, type: 'private' }, text: '/start' } });
-  assert.match(lastText(), /личный/i);
-  assert.equal(await getSetting(db, 'telegram_chat_id'), '777');
+  assert.match(lastText(), /Что умею/);
   console.log('pairing ok');
 
-  // 3. Text about food is estimated, logged, and answered with the remainder.
+  // 3. A sentence about food: the model logs it through the tool and answers.
+  script = [
+    toolCall('log_meal', {
+      description: 'Тарелка овсянки с бананом',
+      kcal: 420,
+      protein_g: 12,
+      fat_g: 8,
+      carbs_g: 72,
+      confidence: 'medium',
+    }),
+    text('📝 Овсянка с бананом — 420 ккал. 🔥 Осталось 1080.'),
+  ];
   await handleUpdate(deps, message({ text: 'тарелка овсянки с бананом' }));
   const meals = await listMeals(db, today());
   assert.equal(meals.length, 1);
   assert.equal(meals[0].kcal, 420);
   assert.equal(meals[0].source, 'telegram');
   assert.match(lastText(), /Овсянка с бананом/);
-  assert.match(lastText(), /Осталось 1080 ккал/);
-  console.log('text meal ok:', lastText().split('\n')[1]);
+  assert.equal(script.length, 0, 'the whole script was used');
+  console.log('text meal ok');
 
-  // 4. A photo goes through getFile, the download and the vision call.
-  estimate = { description: 'Салат с тунцом', kcal: 600, protein_g: 40, fat_g: 25, carbs_g: 50, confidence: 'low' };
-  await handleUpdate(deps, message({ photo: [{ file_id: 'small', width: 90, height: 90 }, { file_id: 'big', width: 1280, height: 960 }] }));
+  // 4. The request itself: thinking on, tools attached, Russian asked for.
+  const first = seen[0];
+  assert.deepEqual(first.thinking, { type: 'enabled', budget_tokens: 3000 });
+  assert.ok((first.tools ?? []).some((t: any) => t.name === 'log_meal'));
+  assert.ok((first.tools ?? []).some((t: any) => t.name === 'list_meals'));
+  assert.match(first.system, /Answer in Russian/);
+  // The tool result went back with the assistant turn intact, thinking included.
+  const withResult = seen[1];
+  assert.equal(withResult.messages.at(-2).role, 'assistant');
+  assert.ok(
+    withResult.messages.at(-2).content.some((b: any) => b.type === 'thinking'),
+    'thinking blocks survive the round trip',
+  );
+  assert.equal(withResult.messages.at(-1).content[0].type, 'tool_result');
+  console.log('request shape ok');
+
+  // 5. A correction in plain words reaches update_meal, and the history that
+  //    makes it possible is there to be read.
+  const id = meals[0].id;
+  script = [
+    toolCall('update_meal', { id, description: 'Овсянка с бананом, без масла', kcal: 360, fat_g: 3 }),
+    text('Поправила: 360 ккал.'),
+  ];
+  await handleUpdate(deps, message({ text: 'там было без масла' }));
+  const corrected = await listMeals(db, today());
+  assert.equal(corrected.length, 1, 'a correction is not a second meal');
+  assert.equal(corrected[0].kcal, 360);
+  const sawHistory = seen.at(-2)!.messages;
+  assert.ok(
+    sawHistory.some((m: any) => JSON.stringify(m.content).includes('овсянки с бананом')),
+    'the earlier turn was replayed',
+  );
+  console.log('correction ok');
+
+  // 6. A photo arrives as an image block; its bytes are not kept in history.
+  script = [text('📝 Записала салат — 600 ккал.')];
+  await handleUpdate(
+    deps,
+    message({
+      photo: [
+        { file_id: 'small', width: 90, height: 90 },
+        { file_id: 'big', width: 1280, height: 960 },
+      ],
+      caption: 'без заправки',
+    }),
+  );
   assert.equal(sent.find(s => s.method === 'getFile')!.body.file_id, 'big', 'uses the largest rendition');
-  assert.equal((await listMeals(db, today())).length, 2);
-  assert.match(lastText(), /Оценка грубая/);
-  assert.match(lastText(), /Осталось 480 ккал/);
-  console.log('photo meal ok');
+  const photoTurn = seen.at(-1)!.messages.at(-1);
+  assert.equal(photoTurn.content[0].type, 'image');
+  assert.equal(photoTurn.content[1].text, 'без заправки');
+  const history = await loadHistory(db, '777');
+  assert.ok(
+    !JSON.stringify(history).includes('jpegbytes'),
+    'the photo itself is not stored',
+  );
+  assert.ok(JSON.stringify(history).includes('[фото еды]'));
+  console.log('photo ok');
 
-  // 5. Asking in words, and the weight shorthand.
-  await handleUpdate(deps, message({ text: 'сколько осталось?' }));
-  assert.match(lastText(), /Осталось 480 ккал/);
-  assert.equal((await listMeals(db, today())).length, 2, 'a question must not log a meal');
-
-  await handleUpdate(deps, message({ text: 'вес 81,4' }));
-  assert.match(lastText(), /81\.4 кг/);
-  assert.equal((await weightTrend(db)).latest?.kg, 81.4);
-  console.log('query and weight ok');
-
-  // 6. /undo removes the last meal.
-  await handleUpdate(deps, message({ text: '/undo' }));
-  assert.equal((await listMeals(db, today())).length, 1);
-  assert.match(lastText(), /Удалила: Салат с тунцом/);
-  console.log('undo ok');
-
-  // 7. Without an Anthropic key, food goes unestimated rather than mis-logged.
-  await handleUpdate({ db, token: TOKEN, anthropicKey: null }, message({ text: 'борщ' }));
-  assert.match(lastText(), /ключ Anthropic/);
-  assert.equal((await listMeals(db, today())).length, 1);
-
-  // 8. A group chat is ignored outright.
-  const before = sent.length;
-  await handleUpdate(deps, { message: { message_id: 9, chat: { id: -100, type: 'supergroup' }, text: '/start' } });
-  assert.equal(sent.length, before, 'no reply in groups');
-  console.log('guards ok');
-
-  // 9. Oura's numbers reach the reply: they raise the budget, and the day
-  //    line says what they were, so the figure is not out of nowhere.
+  // 7. The commands answered without the model at all.
+  const modelCalls = seen.length;
   await upsertMetrics(db, today(), 'oura', {
     active_kcal: 500,
     steps: 9100,
@@ -125,41 +173,70 @@ try {
     workout_min: 35,
   });
   await handleUpdate(deps, message({ text: '/day' }));
-  const withRing = lastText();
-  assert.match(withRing, /1620 \(1500 \+ 120 за активность\)/, 'budget shows the activity bonus');
-  assert.match(withRing, /актив\. 500 ккал/);
-  assert.match(withRing, /9100 шагов/);
-  assert.match(withRing, /трен\. 35 мин/);
-  assert.match(withRing, /сон 6:51/);
-  assert.match(withRing, /готовность 79/);
+  const card = lastText();
+  assert.match(card, /1620 \(1500 \+ 120 за активность\)/, 'the activity bonus is spelled out');
+  assert.match(card, /актив\. 500 ккал/);
+  assert.match(card, /сон 6:51/);
+  assert.match(card, /готовность 79/);
 
   await handleUpdate(deps, message({ text: '/week' }));
-  assert.match(lastText(), /9\.1к/, 'the week shows steps');
-  assert.match(lastText(), /R79/, 'the week shows readiness');
-  console.log('oura metrics ok');
+  assert.match(lastText(), /9\.1к/);
+  assert.match(lastText(), /R79/);
 
-  // 10. Advice: the day goes to the model, the answer comes back with the
-  //     remainder under it, and nothing is logged as a meal.
-  const mealsBefore = (await listMeals(db, today())).length;
-  await handleUpdate(deps, message({ text: 'что мне съесть?' }));
-  assert.equal((await listMeals(db, today())).length, mealsBefore, 'a question is not a meal');
-  assert.match(lastText(), /На оставшийся бюджет/);
-  assert.match(lastText(), /творога 0%/);
-  assert.match(lastText(), /Осталось/, 'the remainder comes with the advice');
-  assert.match(askedFor.at(-1)!, /Left: /, 'the model is told what is left');
-  assert.match(askedFor.at(-1)!, /readiness 79/, 'and what the ring saw');
+  await handleUpdate(deps, message({ text: 'вес 81,4' }));
+  assert.match(lastText(), /81\.4 кг/);
+  assert.equal((await weightTrend(db)).latest?.kg, 81.4);
 
-  await handleUpdate(deps, message({ text: '/eat' }));
-  assert.match(lastText(), /На оставшийся бюджет/);
+  await handleUpdate(deps, message({ text: '/undo' }));
+  assert.equal((await listMeals(db, today())).length, 0);
+  assert.match(lastText(), /Удалила/);
+  assert.equal(seen.length, modelCalls, 'none of those asked the model');
+  console.log('commands ok');
 
-  // "сегодня" also matches the remainder question; advice must win.
-  await handleUpdate(deps, message({ text: 'что сегодня поесть на ужин?' }));
-  assert.match(lastText(), /На оставшийся бюджет/, 'advice wins over the remainder question');
+  // 8. /forget drops the conversation and keeps the data.
+  await handleUpdate(deps, message({ text: '/forget' }));
+  assert.equal((await loadHistory(db, '777')).length, 0);
+  assert.equal((await weightTrend(db)).latest?.kg, 81.4, 'weigh-ins survive');
+  console.log('forget ok');
 
-  // A sentence about eating is still a meal, not a question.
-  await handleUpdate(deps, message({ text: 'съела тарелку овсянки' }));
-  assert.equal((await listMeals(db, today())).length, mealsBefore + 1, 'a described meal is logged');
-  console.log('advice ok');
+  // 9. Guards: no key, no group chats, no other private chat.
+  await handleUpdate({ db, token: TOKEN, anthropicKey: null }, message({ text: 'борщ' }));
+  assert.match(lastText(), /ключ Anthropic/);
+
+  const before = sent.length;
+  await handleUpdate(deps, { message: { message_id: 9, chat: { id: -100, type: 'supergroup' }, text: '/start' } });
+  assert.equal(sent.length, before, 'no reply in groups');
+
+  await handleUpdate(deps, { message: { message_id: 8, chat: { id: 555, type: 'private' }, text: 'привет' } });
+  assert.match(lastText(), /уже привязан/);
+  console.log('guards ok');
+
+  // 10. A model failure is reported, not swallowed, and logs nothing.
+  script = [];
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    if (String(url) === 'https://api.anthropic.com/v1/messages') {
+      return new Response('overloaded', { status: 529 });
+    }
+    return realFetch(url as never, init as never);
+  }) as typeof fetch;
+  const telegramCalls: typeof sent = [];
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    const u = String(url);
+    if (u === 'https://api.anthropic.com/v1/messages') return new Response('overloaded', { status: 529 });
+    if (u.startsWith('https://api.telegram.org/')) {
+      const method = u.split('/').pop()!;
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      telegramCalls.push({ method, body });
+      sent.push({ method, body });
+      return json({ ok: true, result: {} });
+    }
+    throw new Error(`unexpected fetch ${u}`);
+  }) as typeof fetch;
+  await handleUpdate(deps, message({ text: 'борщ' }));
+  assert.match(lastText(), /Не получилось/);
+  assert.match(lastText(), /529/);
+  assert.equal((await listMeals(db, today())).length, 0);
+  console.log('failure ok');
 
   console.log('\nTELEGRAM TEST PASSED');
 } finally {

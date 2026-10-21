@@ -164,6 +164,30 @@ Photos of food, or a sentence about one, become a logged meal and a reply with
 what is left for the day. The bot is part of this server rather than a separate
 service: same database, same budget arithmetic, one more way in.
 
+Behind it is a Claude conversation with tools over that database — `get_day`,
+`log_meal`, `update_meal`, `delete_meal`, `list_meals`, `get_week`,
+`log_weight`, `weight_trend`, `get_targets` — with extended thinking on and the
+last 40 turns of the chat replayed each time. That is what makes it arguable:
+"а без масла" becomes `update_meal` on the id it just created rather than a
+second meal, and "как вчера" becomes `list_meals` for yesterday rather than a
+guess. Photos are sent to the model but not stored; the history keeps the text
+of what was decided.
+
+Four commands skip the model entirely, because they are the same every time and
+should be instant: `/day`, `/week`, `/undo` and a bare `вес 81.4`. `/forget`
+drops the conversation and keeps the data.
+
+Every reply carries the day's remainder and, under it, what the ring reported:
+active energy, steps, workout minutes, sleep and readiness. When activity has
+raised the budget the line says so (`1620 (1500 + 120 за активность)`), so the
+number is never a figure out of nowhere.
+
+The prompt asks for the upper-middle of the plausible range — under-counting is
+the costly error when the point is a deficit — and insists on adding what sits
+on top of a dish rather than naming it: granola on a yogurt, cream on a pastry,
+dressing on a salad. A nutrition label on a package covers the package only. A
+dish named from a menu beats the look of the photo.
+
 Its credentials live in the `settings` table rather than the environment, so
 they can be set over the API without redeploying:
 
@@ -184,28 +208,6 @@ startup in case the public URL changed.
 The first private chat to send `/start` is bound as the owner and every other
 chat is refused; `GET /api/settings` shows which credentials are set, never
 their values.
-
-What it understands: a photo (with an optional caption that sharpens the
-estimate), a sentence about what was eaten, `сколько осталось` or `/day`,
-`что съесть` or `/eat`, `/week`, `вес 81.4`, and `/undo`.
-
-`/eat` is the other direction: instead of pricing what was eaten it reads the
-day — what is left, what has been eaten, what the ring saw — and asks Claude
-for two or three concrete things to eat that fit, in prose rather than a tool
-call. It is told that protein is usually the gap and fat usually overspent, and
-to say so plainly when the kcal left cannot cover the protein left.
-
-Every reply carries the day's remainder and, under it, what the ring reported:
-active energy, steps, workout minutes, sleep and readiness. When activity has
-raised the budget the line says so (`1620 (1500 + 120 за активность)`), so the
-number is never a figure out of nowhere.
-
-Estimates come from Claude with a single forced tool call, asked for the
-upper-middle of the plausible range — under-counting is the costly error when
-the point is a deficit. The prompt insists on adding what sits on top of a dish
-rather than naming it: granola on a yogurt, cream on a pastry, dressing on a
-salad. A nutrition label on a package covers the package only; anything added
-to it is counted on top.
 
 ## REST API (bearer `API_TOKEN`)
 

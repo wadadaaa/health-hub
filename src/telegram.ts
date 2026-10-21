@@ -1,16 +1,24 @@
 /**
- * Telegram bot: photos and sentences about food in, a logged meal and the
- * day's remaining budget out.
+ * Telegram bot: the transport. Photos and sentences go to the agent, which
+ * decides what they mean and writes the reply; a handful of commands are
+ * answered from the database directly because they are always the same.
  *
  * The webhook lives behind a secret path and Telegram's own secret-token
  * header. The first chat to say /start is bound as the owner (the URL is
  * already unguessable); everything after that is refused.
  */
 import type { Queryable } from './db.js';
-import { estimateFromPhoto, estimateFromText, EstimateError, type MealEstimate } from './estimate.js';
+import { AgentError, forgetHistory, respond, type Block } from './agent.js';
 import { getSetting, setSetting } from './settings.js';
-import { suggestFood, SuggestError } from './suggest.js';
-import { deleteMeal, getDay, getWeek, listMeals, logMeal, logWeight, type DaySummary } from './service.js';
+import {
+  deleteMeal,
+  getDay,
+  getWeek,
+  listMeals,
+  logWeight,
+  type DaySummary,
+  type WeekSummary,
+} from './service.js';
 
 const API = 'https://api.telegram.org';
 
@@ -107,36 +115,21 @@ function dayLine(day: DaySummary): string {
   return lines.join('\n');
 }
 
-function mealReply(est: MealEstimate, day: DaySummary, id: number): string {
-  const lines = [
-    `📝 Записала: <b>${est.description}</b>`,
-    `${est.kcal} ккал · Б ${r1(est.protein_g)} · Ж ${r1(est.fat_g)} · У ${r1(est.carbs_g)}`,
-  ];
-  if (est.confidence === 'low') lines.push('🤔 <i>Оценка грубая — напиши состав или вес, уточню.</i>');
-  if (est.note) lines.push(`<i>${est.note}</i>`);
-  lines.push('', dayLine(day));
-  lines.push(`<i>/undo — удалить (#${id})</i>`);
-  return lines.join('\n');
-}
-
 const HELP = [
   'Что умею:',
   '📸 <b>фото еды</b> — оценю и запишу; подпись с деталями («без масла», «300 г») уточняет оценку',
   '✍️ <b>текстом</b>: «тарелка овсянки с бананом» — то же самое, без фото',
   '🔥 <b>«сколько осталось»</b> или /day — остаток на сегодня',
-  '🍽 <b>«что съесть»</b> или /eat — что взять на оставшийся бюджет',
+  '🍽 <b>«что съесть»</b> — что взять на оставшийся бюджет',
+  '💬 <b>просто словами</b>: «а без масла», «как вчера», «сколько белка осталось» — он помнит разговор',
   '📊 <b>/week</b> — неделя и динамика веса',
   '⚖️ <b>«вес 81.4»</b> — записать взвешивание',
   '🗑 <b>/undo</b> — удалить последнюю запись',
+  '🧹 <b>/forget</b> — забыть разговор (записи еды останутся)',
 ].join('\n');
 
 // ---------- routing ----------
 
-const ASK_REMAINING = /(скольк|остал|остаток|бюджет|сегодня)/i;
-// Asking for advice, not describing a meal: "что съесть", "посоветуй что-нибудь",
-// "чем поужинать". Anchored on the question so "съел салат" still logs a salad.
-const ASK_WHAT_TO_EAT =
-  /(^|\s)(что|чего|чем)\s+(\S+\s+){0,2}(съесть|поесть|покушать|пожрать|заказать|приготовить|поужинать|пообедать|позавтракать)|посовету|что\s+(на|для)\s+(ужин|обед|завтрак)/i;
 const WEIGHT = /^\s*(?:вес|weight)\s*[:=]?\s*(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:кг|kg)?\s*$/i;
 
 export interface TelegramDeps {
@@ -178,68 +171,20 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
   const { db, token, anthropicKey } = deps;
   const text = (msg.text ?? '').trim();
 
-  if (msg.photo?.length) {
-    if (!anthropicKey) {
-      await send(token, chatId, 'Фото пока не распознаю: на сервере не задан ключ Anthropic API.');
-      return;
-    }
-    // The last entry is the largest rendition Telegram kept.
-    const best = msg.photo[msg.photo.length - 1];
-    await tg(token, 'sendChatAction', { chat_id: chatId, action: 'typing' });
-    const image = await fetchPhoto(token, best.file_id);
-    const est = await estimateFromPhoto(anthropicKey, image, msg.caption);
-    const meal = await logMeal(db, { ...est, source: 'telegram' });
-    await send(token, chatId, mealReply(est, await getDay(db), meal.id));
-    return;
-  }
-
-  if (!text) return;
-
+  // Commands answered from the database alone: instant, free, and the same
+  // every time. Everything else is a conversation.
   if (text.startsWith('/start') || text.startsWith('/help')) {
     await send(token, chatId, HELP);
     return;
   }
 
-  if (text.startsWith('/eat') || ASK_WHAT_TO_EAT.test(text)) {
-    if (!anthropicKey) {
-      await send(token, chatId, 'Совет не соберу: на сервере не задан ключ Anthropic API.');
-      return;
-    }
-    await tg(token, 'sendChatAction', { chat_id: chatId, action: 'typing' });
-    const day = await getDay(db);
-    const advice = await suggestFood(anthropicKey, day, text.replace(/^\/eat\s*/i, ''));
-    await send(token, chatId, `🍽 <b>На оставшийся бюджет</b>\n${advice}\n\n${dayLine(day)}`);
-    return;
-  }
-
-  if (text.startsWith('/day') || ASK_REMAINING.test(text)) {
-    const day = await getDay(db);
-    const meals = day.meals.map(m => `• ${m.description} — ${m.kcal}`).join('\n');
-    await send(token, chatId, meals ? `${dayLine(day)}\n\n${meals}` : dayLine(day));
+  if (text.startsWith('/day')) {
+    await send(token, chatId, dayCard(await getDay(db)));
     return;
   }
 
   if (text.startsWith('/week')) {
-    const week = await getWeek(db);
-    // Narrow enough for a phone: date, kcal, protein, steps in thousands,
-    // readiness. Protein and readiness are the two that a kcal total hides.
-    const rows = week.days
-      .map(d => {
-        const cells = [d.day.slice(5), d.meals ? `${d.consumed}/${d.budget}` : '—'];
-        if (d.meals) cells.push(`Б${Math.round(d.protein_g)}`);
-        if (d.steps != null) cells.push(`${r1(d.steps / 1000)}к`);
-        if (d.readiness != null) cells.push(`R${Math.round(d.readiness)}`);
-        return cells.join(' ');
-      })
-      .join('\n');
-    const w = week.weight;
-    const trend =
-      w.avg7_now != null
-        ? `\n\nВес: ${w.latest?.kg} кг, среднее за 7 дней ${w.avg7_now}${
-            w.delta_week != null ? ` (${w.delta_week > 0 ? '+' : ''}${w.delta_week} за неделю)` : ''
-          }`
-        : '';
-    await send(token, chatId, `📊 <b>Неделя</b>\n${rows}${trend}`);
+    await send(token, chatId, weekCard(await getWeek(db)));
     return;
   }
 
@@ -255,6 +200,13 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
     return;
   }
 
+  if (text.startsWith('/forget')) {
+    await forgetHistory(db, String(chatId));
+    await send(token, chatId, '🧹 Забыла разговор. Записи еды и вес на месте.');
+    return;
+  }
+
+  // A bare weigh-in is unambiguous and not worth a model call.
   const weight = WEIGHT.exec(text);
   if (weight) {
     const kg = Number(weight[1].replace(',', '.'));
@@ -263,14 +215,59 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
     return;
   }
 
+  if (!msg.photo?.length && !text) return;
+
   if (!anthropicKey) {
-    await send(token, chatId, 'Не задан ключ Anthropic API — оценивать еду пока нечем.');
+    await send(token, chatId, 'На сервере не задан ключ Anthropic API — ни оценить, ни ответить пока нечем.');
     return;
   }
+
+  const content: Block[] = [];
+  if (msg.photo?.length) {
+    // The last entry is the largest rendition Telegram kept.
+    const best = msg.photo[msg.photo.length - 1];
+    await tg(token, 'sendChatAction', { chat_id: chatId, action: 'typing' });
+    const image = await fetchPhoto(token, best.file_id);
+    content.push({
+      type: 'image',
+      source: { type: 'base64', media_type: image.mediaType, data: image.base64 },
+    });
+  }
+  const said = msg.photo?.length ? (msg.caption ?? '').trim() : text;
+  content.push({ type: 'text', text: said || 'Что это и сколько в нём?' });
+
   await tg(token, 'sendChatAction', { chat_id: chatId, action: 'typing' });
-  const est = await estimateFromText(anthropicKey, text);
-  const meal = await logMeal(db, { ...est, source: 'telegram' });
-  await send(token, chatId, mealReply(est, await getDay(db), meal.id));
+  await send(token, chatId, await respond({ db, apiKey: anthropicKey, chatId: String(chatId) }, content));
 }
 
-export { EstimateError, SuggestError };
+/** The day, rendered the same way every time, for /day. */
+function dayCard(day: DaySummary): string {
+  const meals = day.meals.map(m => `• ${m.description} — ${m.kcal}`).join('\n');
+  return meals ? `${dayLine(day)}\n\n${meals}` : dayLine(day);
+}
+
+/**
+ * Narrow enough for a phone: date, kcal, protein, steps in thousands,
+ * readiness. Protein and readiness are the two that a kcal total hides.
+ */
+function weekCard(week: WeekSummary): string {
+  const rows = week.days
+    .map(d => {
+      const cells = [d.day.slice(5), d.meals ? `${d.consumed}/${d.budget}` : '—'];
+      if (d.meals) cells.push(`Б${Math.round(d.protein_g)}`);
+      if (d.steps != null) cells.push(`${r1(d.steps / 1000)}к`);
+      if (d.readiness != null) cells.push(`R${Math.round(d.readiness)}`);
+      return cells.join(' ');
+    })
+    .join('\n');
+  const w = week.weight;
+  const trend =
+    w.avg7_now != null
+      ? `\n\nВес: ${w.latest?.kg} кг, среднее за 7 дней ${w.avg7_now}${
+          w.delta_week != null ? ` (${w.delta_week > 0 ? '+' : ''}${w.delta_week} за неделю)` : ''
+        }`
+      : '';
+  return `📊 <b>Неделя</b>\n${rows}${trend}`;
+}
+
+export { AgentError };
