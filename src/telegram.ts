@@ -9,6 +9,7 @@
  */
 import type { Queryable } from './db.js';
 import { AgentError, forgetHistory, respond, type Block } from './agent.js';
+import { composeBriefing } from './briefing.js';
 import { getSetting, setSetting } from './settings.js';
 import {
   deleteMeal,
@@ -49,6 +50,10 @@ async function tg<T>(token: string, method: string, body: unknown): Promise<T> {
   const parsed = JSON.parse(text) as { ok: boolean; result: T; description?: string };
   if (!parsed.ok) throw new Error(`Telegram ${method}: ${parsed.description ?? 'not ok'}`);
   return parsed.result;
+}
+
+export async function sendMessage(token: string, chatId: number, text: string): Promise<void> {
+  await send(token, chatId, text);
 }
 
 async function send(token: string, chatId: number, text: string): Promise<void> {
@@ -125,6 +130,7 @@ const HELP = [
   '📊 <b>/week</b> — неделя и динамика веса',
   '⚖️ <b>«вес 81.4»</b> — записать взвешивание',
   '🗑 <b>/undo</b> — удалить последнюю запись',
+  '☀️ <b>/brief</b> — утренняя сводка (сама приходит в 7:10)',
   '🧹 <b>/forget</b> — забыть разговор (записи еды останутся)',
 ].join('\n');
 
@@ -197,6 +203,11 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
     }
     await deleteMeal(db, last.id);
     await send(token, chatId, `🗑 Удалила: ${last.description} (−${last.kcal} ккал)\n\n${dayLine(await getDay(db))}`);
+    return;
+  }
+
+  if (text.startsWith('/brief')) {
+    await send(token, chatId, await composeBriefing(db));
     return;
   }
 

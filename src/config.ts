@@ -19,6 +19,7 @@ const schema = z.object({
   OURA_CLIENT_ID: z.string().optional(),
   OURA_CLIENT_SECRET: z.string().optional(),
   OURA_CRON: z.string().default('17 * * * *'),
+  BRIEFING_CRON: z.string().default('10 7 * * *'),
   OURA_BACKFILL_DAYS: z.coerce.number().int().positive().default(3),
 
   TZ_LOCAL: z.string().default('Asia/Jerusalem'),

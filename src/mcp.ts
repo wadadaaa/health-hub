@@ -13,6 +13,8 @@ import {
   updateMeal,
   weightTrend,
 } from './service.js';
+import { energyBalance } from './energy.js';
+import { insights } from './insights.js';
 import { ingestOura, type TokenSource } from './ingest/oura.js';
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] });
@@ -35,6 +37,32 @@ export interface McpDeps {
  */
 export function createMcpServer({ db, ouraTokenSource }: McpDeps): McpServer {
   const server = new McpServer({ name: 'health-hub', version: '0.1.0' });
+
+  server.registerTool(
+    'energy_balance',
+    {
+      title: 'Measured energy expenditure',
+      description:
+        'Derive actual daily expenditure from logged intake and the weight trend over a window, instead of assuming ' +
+        'it from a formula. Returns the figure, its confidence, and notes saying what is missing when it cannot be ' +
+        'computed. Never present a null tdee as a number.',
+      inputSchema: { days: z.number().int().min(7).max(120).default(28) },
+    },
+    async ({ days }) => json(await energyBalance(db, days)),
+  );
+
+  server.registerTool(
+    'insights',
+    {
+      title: 'Day-level comparisons',
+      description:
+        'Intake after a short night, intake and protein on training days, sleep after a late meal. Each split ' +
+        'carries group sizes and a reportable flag; ignore the ones marked not reportable and do not call any of ' +
+        'them causal.',
+      inputSchema: { days: z.number().int().min(7).max(120).default(28) },
+    },
+    async ({ days }) => json(await insights(db, days)),
+  );
 
   server.registerTool(
     'log_meal',

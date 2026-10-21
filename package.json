@@ -14,9 +14,10 @@
     "ingest:oura": "tsx src/ingest/oura-cli.ts",
     "test:smoke": "tsx test/smoke.ts",
     "test:oura": "tsx test/oura-auth.ts",
-    "test": "npm run test:smoke && npm run test:oura && npm run test:readiness && npm run test:telegram",
+    "test": "npm run test:smoke && npm run test:oura && npm run test:readiness && npm run test:telegram && npm run test:energy",
     "test:readiness": "tsx test/readiness.ts",
-    "test:telegram": "tsx test/telegram.ts"
+    "test:telegram": "tsx test/telegram.ts",
+    "test:energy": "tsx test/energy.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

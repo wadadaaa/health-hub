@@ -1,3 +1,6 @@
+import { composeBriefing } from './briefing.js';
+import { energyBalance } from './energy.js';
+import { insights } from './insights.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -203,6 +206,20 @@ export function createApp({ db, config, oura, readiness, publicUrl }: AppDeps) {
   api.get('/weight', async (req, res) => {
     const days = Math.min(365, Math.max(7, Number(req.query.days ?? 28) || 28));
     res.json(await weightTrend(db, days));
+  });
+
+  api.get('/energy', async (req, res) => {
+    const days = Math.min(120, Math.max(7, Number(req.query.days ?? 28) || 28));
+    res.json(await energyBalance(db, days));
+  });
+
+  api.get('/insights', async (req, res) => {
+    const days = Math.min(120, Math.max(7, Number(req.query.days ?? 28) || 28));
+    res.json(await insights(db, days));
+  });
+
+  api.get('/briefing', async (_req, res) => {
+    res.type('text/plain').send(await composeBriefing(db));
   });
 
   api.post('/meals', async (req, res) => {

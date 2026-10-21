@@ -1,5 +1,5 @@
 import { loadConfig } from './config.js';
-import { startOuraCron } from './cron.js';
+import { startBriefingCron, startOuraCron } from './cron.js';
 import { createPool, migrate } from './db.js';
 import { setTimezone } from './dates.js';
 import { createApp } from './http.js';
@@ -67,6 +67,9 @@ void keepTrying(readiness, async () => {
     startOuraCron(pool, ouraTokenSource, config.OURA_CRON, config.OURA_BACKFILL_DAYS, config.TZ_LOCAL);
     console.log(`[oura] cron "${config.OURA_CRON}" (${config.TZ_LOCAL})`);
   }
+
+  startBriefingCron(pool, config.BRIEFING_CRON, config.TZ_LOCAL);
+  console.log(`[briefing] cron "${config.BRIEFING_CRON}" (${config.TZ_LOCAL})`);
 
   // Re-point Telegram at this deployment, in case the public URL changed.
   void (async () => {

@@ -11,6 +11,8 @@
  */
 import type { Queryable } from './db.js';
 import { timezone, today } from './dates.js';
+import { energyBalance } from './energy.js';
+import { insights } from './insights.js';
 import {
   deleteMeal,
   getDay,
@@ -133,6 +135,31 @@ const TOOLS = [
     input_schema: { type: 'object', properties: { days: { type: 'number' } }, required: [] },
   },
   {
+    name: 'energy_balance',
+    description:
+      'What the body actually spends, measured from logged intake and the weight trend rather than assumed by a ' +
+      'formula, with a confidence and what is missing. Use this when asked whether the budget is right, how fast ' +
+      'weight is coming off, or what the real maintenance level is. Never quote the tdee when it is null — say what ' +
+      'the notes say is missing.',
+    input_schema: {
+      type: 'object',
+      properties: { days: { type: 'number', description: 'Window length, default 28.' } },
+      required: [],
+    },
+  },
+  {
+    name: 'insights',
+    description:
+      'Day-level comparisons: intake after a short night, intake on training days, sleep after a late meal, protein ' +
+      'on training days. Each carries its group sizes and a reportable flag. Say nothing about a split whose ' +
+      'reportable is false, and never describe any of them as a cause.',
+    input_schema: {
+      type: 'object',
+      properties: { days: { type: 'number', description: 'Window length, default 28.' } },
+      required: [],
+    },
+  },
+  {
     name: 'get_targets',
     description: 'The calorie and macro targets in force, and the rule that turns activity into a bigger budget.',
     input_schema: { type: 'object', properties: { day }, required: [] },
@@ -175,6 +202,10 @@ async function runTool(db: Queryable, name: string, a: Record<string, unknown>):
     }
     case 'weight_trend':
       return weightTrend(db, Number(a.days ?? 28));
+    case 'energy_balance':
+      return energyBalance(db, Number(a.days ?? 28));
+    case 'insights':
+      return insights(db, Number(a.days ?? 28));
     case 'get_targets':
       return getTargets(db, (a.day as string) ?? today());
     default:

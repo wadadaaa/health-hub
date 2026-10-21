@@ -45,7 +45,8 @@ lands on the day you'd expect.
 ## MCP tools
 
 `log_meal`, `update_meal`, `delete_meal`, `get_day`, `get_week`, `log_weight`,
-`weight_trend`, `get_targets`, `set_targets`, `sync_oura`.
+`weight_trend`, `get_targets`, `set_targets`, `sync_oura`, `energy_balance`,
+`insights`.
 
 Two endpoints serve them:
 
@@ -119,6 +120,11 @@ cannot bind their own Oura account to the server; the callback is a fixed URI
 Refresh tokens are single-use: every refresh returns a new one, and the server
 replaces the stored row in the same statement. `GET /api/oura/status` reports
 whether it is connected and when the current access token expires.
+
+`workout_min` counts real logged workout sessions from Oura's `workout`
+collection, not high-plus-medium activity minutes: the latter puts an hour of
+ordinary walking in the same field and makes every day a training day. The
+active-minutes figure is kept in `payload` where it belongs.
 
 After that the server syncs hourly (`OURA_CRON`) over the last
 `OURA_BACKFILL_DAYS` days, and once at startup. A longer backfill:
@@ -209,12 +215,51 @@ The first private chat to send `/start` is bound as the owner and every other
 chat is refused; `GET /api/settings` shows which credentials are set, never
 their values.
 
+## Measured expenditure
+
+A calorie target is normally a formula: a guess at resting metabolism times a
+guess at an activity factor. Over a few weeks the scale answers it directly.
+
+```
+TDEE = mean intake + (weight lost × 7700) / days
+```
+
+`energy_balance` does that arithmetic over a window and, more importantly,
+refuses to when the evidence is not there: fewer than two weigh-ins, fewer than
+14 days between them, or food logged on under 80% of the days — a missed day
+looks like a fast and would inflate the answer. It returns the figure, a
+confidence, the budget that would produce half a kilo a week, and plain
+sentences about what is missing. 7700 kcal/kg is an approximation and so is
+everything resting on it; the point is that it is anchored to this person's own
+scale rather than to a population.
+
+## Day-level comparisons
+
+`insights` splits the days four ways — intake after a short night, intake and
+protein on training days, sleep after a late meal — and reports group sizes
+alongside every difference. Nothing below four days in each group is marked
+reportable, and nothing in the output claims a cause. With one person and a few
+weeks of data almost any split produces a difference and most of them are noise;
+the discipline is in what it declines to say.
+
+## Morning briefing
+
+A cron at `BRIEFING_CRON` (default `10 7 * * *`, local) sends last night's sleep
+and readiness, today's budget and protein target, how yesterday ended, the
+7-day weight average, and the measured expenditure once there is enough of it.
+Written from the database alone — no model call, so it costs nothing and reads
+the same every morning. `/brief` in the chat, or `GET /api/briefing`, renders it
+on demand.
+
 ## REST API (bearer `API_TOKEN`)
 
 ```
 GET  /api/day?date=YYYY-MM-DD
 GET  /api/week?end=YYYY-MM-DD
 GET  /api/weight?days=28
+GET  /api/energy?days=28
+GET  /api/insights?days=28
+GET  /api/briefing
 POST /api/meals        { description, kcal, protein_g?, fat_g?, carbs_g?, confidence?, eaten_at?, source? }
 POST /api/ingest/oura?days=3
 ```
@@ -243,6 +288,7 @@ npm run test:smoke     # in-memory Postgres (pg-mem): MCP handshake, tools, webh
 npm run test:oura      # Oura OAuth2: PKCE, single-use state, refresh rotation
 npm run test:readiness # startup retry, and what /healthz says while the db is down
 npm run test:telegram  # bot pairing, photo and text meals, queries, /undo
+npm run test:energy    # measured expenditure, the splits, and what they refuse to say
 npm run dev            # needs DATABASE_URL and the secrets in the environment
 npm run build
 ```
@@ -252,4 +298,3 @@ npm run build
 - OAuth 2.1 in front of `/mcp` (the SDK ships `mcpAuthRouter`), to drop the
   secret from the path.
 - A weekly dashboard over `/api/week`.
-- A nightly job that posts the day's summary.

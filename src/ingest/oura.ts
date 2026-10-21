@@ -44,6 +44,16 @@ interface DailyScore {
   day: string;
   score?: number | null;
 }
+interface Workout {
+  day: string;
+  activity?: string | null;
+  calories?: number | null;
+  intensity?: string | null;
+  label?: string | null;
+  source?: string | null;
+  start_datetime?: string | null;
+  end_datetime?: string | null;
+}
 interface SleepSession {
   day: string;
   type?: string;
@@ -52,6 +62,17 @@ interface SleepSession {
   lowest_heart_rate?: number | null;
   bedtime_start?: string;
   bedtime_end?: string;
+}
+
+/** Total minutes of a set of workouts, from their own start and end times. */
+function minutes(ws: Workout[]): number {
+  let total = 0;
+  for (const w of ws) {
+    if (!w.start_datetime || !w.end_datetime) continue;
+    const ms = Date.parse(w.end_datetime) - Date.parse(w.start_datetime);
+    if (Number.isFinite(ms) && ms > 0) total += ms / 60000;
+  }
+  return Math.round(total);
 }
 
 export interface OuraIngestResult {
@@ -80,26 +101,39 @@ export async function ingestOura(
   // Oura's end_date is exclusive for some collections; ask one day extra and filter.
   const end = shiftDay(endDay, 1);
 
-  const [activity, sleepScores, readiness, sessions] = await Promise.all([
+  const [activity, sleepScores, readiness, sessions, workouts] = await Promise.all([
     fetchAll<DailyActivity>(token, 'daily_activity', start, end),
     fetchAll<DailyScore>(token, 'daily_sleep', start, end),
     fetchAll<DailyScore>(token, 'daily_readiness', start, end),
     fetchAll<SleepSession>(token, 'sleep', start, end),
+    // Deliberately tolerant: a missing workout scope should cost the workouts,
+    // not the whole sync.
+    fetchAll<Workout>(token, 'workout', start, end).catch((e) => {
+      console.warn('[oura] workouts unavailable:', e instanceof Error ? e.message : e);
+      return [] as Workout[];
+    }),
   ]);
 
   const perDay = new Map<
     string,
-    { activity?: DailyActivity; sleep_score?: number | null; readiness?: number | null; sessions: SleepSession[] }
+    {
+      activity?: DailyActivity;
+      sleep_score?: number | null;
+      readiness?: number | null;
+      sessions: SleepSession[];
+      workouts: Workout[];
+    }
   >();
   const slot = (day: string) => {
     let s = perDay.get(day);
-    if (!s) perDay.set(day, (s = { sessions: [] }));
+    if (!s) perDay.set(day, (s = { sessions: [], workouts: [] }));
     return s;
   };
   for (const a of activity) if (a.day <= endDay) slot(a.day).activity = a;
   for (const s of sleepScores) if (s.day <= endDay) slot(s.day).sleep_score = s.score ?? null;
   for (const r of readiness) if (r.day <= endDay) slot(r.day).readiness = r.score ?? null;
   for (const s of sessions) if (s.day <= endDay) slot(s.day).sessions.push(s);
+  for (const w of workouts) if (w.day <= endDay) slot(w.day).workouts.push(w);
 
   const touched: string[] = [];
   for (const [day, d] of perDay) {
@@ -110,7 +144,11 @@ export async function ingestOura(
     const hrvs = nights.map((s) => s.average_hrv).filter((v): v is number => v != null);
     const lows = nights.map((s) => s.lowest_heart_rate).filter((v): v is number => v != null);
     const a = d.activity;
-    const workoutMin = a ? ((a.high_activity_time ?? 0) + (a.medium_activity_time ?? 0)) / 60 : null;
+    // Real sessions only. Summing Oura's high and medium activity instead puts
+    // an hour of ordinary walking in here and makes every day a training day.
+    const workoutMin = minutes(d.workouts);
+    // Kept because it is genuinely useful, just not as "workout".
+    const activeMin = a ? ((a.high_activity_time ?? 0) + (a.medium_activity_time ?? 0)) / 60 : null;
 
     await upsertMetrics(
       db,
@@ -123,10 +161,18 @@ export async function ingestOura(
         hrv: hrvs.length ? hrvs.reduce((x, y) => x + y, 0) / hrvs.length : null,
         resting_hr: lows.length ? Math.min(...lows) : null,
         readiness: d.readiness ?? null,
-        workout_min: workoutMin && workoutMin > 0 ? workoutMin : null,
+        workout_min: workoutMin > 0 ? workoutMin : null,
       },
       {
         activity_score: a?.score ?? null,
+        active_minutes: activeMin && activeMin > 0 ? Math.round(activeMin) : null,
+        workouts: d.workouts.map((w) => ({
+          activity: w.activity ?? null,
+          intensity: w.intensity ?? null,
+          source: w.source ?? null,
+          minutes: Math.round(minutes([w])),
+          calories: w.calories ?? null,
+        })),
         total_calories: a?.total_calories ?? null,
         sleep_score: d.sleep_score ?? null,
         readiness: d.readiness ?? null,
