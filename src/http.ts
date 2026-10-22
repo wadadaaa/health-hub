@@ -1,6 +1,7 @@
 import { composeBriefing } from './briefing.js';
 import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
+import { cycleStatus, logPeriodStart } from './cycle.js';
 import { calibration, listFacts } from './memory.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
@@ -217,6 +218,18 @@ export function createApp({ db, config, oura, readiness, publicUrl }: AppDeps) {
   api.get('/insights', async (req, res) => {
     const days = Math.min(120, Math.max(7, Number(req.query.days ?? 28) || 28));
     res.json(await insights(db, days));
+  });
+
+  api.get('/cycle', async (req, res) => {
+    const day = typeof req.query.date === 'string' && isDay(req.query.date) ? req.query.date : today();
+    res.json(await cycleStatus(db, day));
+  });
+
+  api.post('/cycle/start', async (req, res) => {
+    const b = req.body ?? {};
+    const day = typeof b.day === 'string' && isDay(b.day) ? b.day : today();
+    await logPeriodStart(db, day, typeof b.note === 'string' ? b.note : undefined);
+    res.json(await cycleStatus(db, day));
   });
 
   api.get('/facts', async (_req, res) => {

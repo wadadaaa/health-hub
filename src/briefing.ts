@@ -9,6 +9,7 @@
  */
 import type { Queryable } from './db.js';
 import { shiftDay, today } from './dates.js';
+import { cycleStatus } from './cycle.js';
 import { energyBalance } from './energy.js';
 import { getDay, weightTrend } from './service.js';
 
@@ -18,11 +19,12 @@ const signed = (v: number) => (v > 0 ? `+${r1(v)}` : String(r1(v)));
 
 export async function composeBriefing(db: Queryable, day: string = today()): Promise<string> {
   const yesterday = shiftDay(day, -1);
-  const [t, y, trend, energy] = await Promise.all([
+  const [t, y, trend, energy, cycle] = await Promise.all([
     getDay(db, day),
     getDay(db, yesterday),
     weightTrend(db, 28, day),
     energyBalance(db, 28, day),
+    cycleStatus(db, day),
   ]);
 
   const lines: string[] = [`☀️ <b>${day}</b>`];
@@ -61,8 +63,14 @@ export async function composeBriefing(db: Queryable, day: string = today()): Pro
     lines.push('', '📉 Вчера ничего не записано.');
   }
 
-  // Weight: the trend, never a single number.
+  // Weight: the trend, never a single number — and in the luteal phase, with
+  // the reason the number may be lying.
   lines.push(weightLine(trend));
+  if (cycle.cycle_day != null) {
+    const hedge = cycle.confidence === 'assumed' ? ', фаза предположительная' : '';
+    lines.push(`🌙 Цикл: день ${cycle.cycle_day}, ${cycle.phase}${hedge}`);
+    if (cycle.phase === 'лютеиновая') lines.push('   вес сейчас может держать 1–2 кг воды — это не жир');
+  }
 
   // The measured expenditure, once there is enough of it to mean anything.
   if (energy.tdee != null) {

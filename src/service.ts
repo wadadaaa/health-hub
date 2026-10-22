@@ -38,6 +38,8 @@ export interface MetricFields {
   sleep_min?: number | null;
   readiness?: number | null;
   workout_min?: number | null;
+  /** Oura's nightly skin temperature, as a deviation from the wearer's baseline. */
+  temp_deviation?: number | null;
 }
 
 export interface Metrics extends MetricFields {
@@ -286,11 +288,12 @@ const PRECEDENCE: Record<keyof MetricFields, string[]> = {
   hrv: ['manual', 'oura', 'apple'],
   sleep_min: ['manual', 'oura', 'apple'],
   readiness: ['manual', 'oura'],
+  temp_deviation: ['manual', 'oura'],
 };
 
 export async function getMetrics(db: Queryable, day: string): Promise<Metrics> {
   const { rows } = await db.query<MetricRow>(
-    `SELECT source, active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min
+    `SELECT source, active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min, temp_deviation
      FROM daily_metrics WHERE day = $1`,
     [day],
   );
@@ -319,8 +322,8 @@ export async function upsertMetrics(
 ): Promise<void> {
   const clean = (v: number | null | undefined) => (v == null || Number.isNaN(v) ? null : v);
   await db.query(
-    `INSERT INTO daily_metrics (day, source, active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min, payload, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+    `INSERT INTO daily_metrics (day, source, active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min, temp_deviation, payload, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
      ON CONFLICT (day, source) DO UPDATE SET
        active_kcal = COALESCE(EXCLUDED.active_kcal, daily_metrics.active_kcal),
        steps       = COALESCE(EXCLUDED.steps,       daily_metrics.steps),
@@ -329,6 +332,7 @@ export async function upsertMetrics(
        sleep_min   = COALESCE(EXCLUDED.sleep_min,   daily_metrics.sleep_min),
        readiness   = COALESCE(EXCLUDED.readiness,   daily_metrics.readiness),
        workout_min = COALESCE(EXCLUDED.workout_min, daily_metrics.workout_min),
+       temp_deviation = COALESCE(EXCLUDED.temp_deviation, daily_metrics.temp_deviation),
        payload     = COALESCE(EXCLUDED.payload,     daily_metrics.payload),
        updated_at  = now()`,
     [
@@ -341,6 +345,7 @@ export async function upsertMetrics(
       clean(fields.sleep_min == null ? null : Math.round(fields.sleep_min)),
       clean(fields.readiness == null ? null : Math.round(fields.readiness)),
       clean(fields.workout_min == null ? null : Math.round(fields.workout_min)),
+      clean(fields.temp_deviation == null ? null : Math.round(fields.temp_deviation * 100) / 100),
       payload === undefined ? null : JSON.stringify(payload),
     ],
   );

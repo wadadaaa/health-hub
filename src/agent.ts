@@ -13,6 +13,7 @@ import type { Queryable } from './db.js';
 import { timezone, today } from './dates.js';
 import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
+import { cycleStatus, deletePeriodStart, listCycles, logPeriodStart } from './cycle.js';
 import { calibration, forget, learnedPrompt, listFacts, recallMeals, remember } from './memory.js';
 import {
   deleteMeal,
@@ -183,6 +184,26 @@ const TOOLS = [
     input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
+    name: 'cycle_status',
+    description:
+      'Where she is in her menstrual cycle: cycle day, predicted phase, her own mean cycle length, and notes. ' +
+      'Call this before interpreting the scale or a plateau, and before advising on appetite. The phase is ' +
+      'predicted from logged period starts, not observed — if confidence is "assumed" or "none", say so.',
+    input_schema: { type: 'object', properties: { day }, required: [] },
+  },
+  {
+    name: 'log_period_start',
+    description:
+      'Record the first day of a period. "Первый день цикла", "начались месячные" and the like mean today unless ' +
+      'she names another day.',
+    input_schema: { type: 'object', properties: { day, note: { type: 'string' } }, required: [] },
+  },
+  {
+    name: 'list_cycles',
+    description: 'Logged period starts with the length of each cycle they began.',
+    input_schema: { type: 'object', properties: { limit: { type: 'number' } }, required: [] },
+  },
+  {
     name: 'energy_balance',
     description:
       'What the body actually spends, measured from logged intake and the weight trend rather than assumed by a ' +
@@ -260,6 +281,13 @@ async function runTool(db: Queryable, name: string, a: Record<string, unknown>):
       return { facts: await listFacts(db) };
     case 'calibration':
       return calibration(db);
+    case 'cycle_status':
+      return cycleStatus(db, (a.day as string) ?? today());
+    case 'log_period_start':
+      await logPeriodStart(db, (a.day as string) ?? today(), a.note ? String(a.note) : undefined);
+      return cycleStatus(db, (a.day as string) ?? today());
+    case 'list_cycles':
+      return { cycles: await listCycles(db, Number(a.limit ?? 12)) };
     case 'energy_balance':
       return energyBalance(db, Number(a.days ?? 28));
     case 'insights':
@@ -304,6 +332,11 @@ async function system(db: Queryable): Promise<string> {
     '',
     'When the person names the dish from a menu, trust the menu over the look of the photo: a stew is not fried, and a',
     'named grain is not the one you guessed.',
+    '',
+    'THE CYCLE',
+    'Before reading the scale, a plateau, or a question about appetite, call cycle_status. In the luteal phase the',
+    'scale commonly sits 1-2 kg high on water alone — larger than a fortnight of real fat loss — so a plateau there',
+    'is usually not one, and the worst answer is to cut further. Say when a phase is predicted rather than known.',
     '',
     'ADVICE',
     'When asked what to eat, call get_day first and fit the answer to what is actually short. Protein is almost always',

@@ -66,9 +66,10 @@ try {
   const names = list.body.result.tools.map((t: { name: string }) => t.name).sort();
   console.log('tools:', names.join(', '));
   assert.deepEqual(names, [
-    'calibration', 'delete_meal', 'energy_balance', 'forget_fact', 'get_day', 'get_targets',
-    'get_week', 'insights', 'list_facts', 'log_meal', 'log_weight', 'recall_meals',
-    'remember', 'set_targets', 'sync_oura', 'update_meal', 'weight_trend',
+    'calibration', 'cycle_status', 'delete_meal', 'delete_period_start', 'energy_balance',
+    'forget_fact', 'get_day', 'get_targets', 'get_week', 'insights', 'list_cycles',
+    'list_facts', 'log_meal', 'log_period_start', 'log_weight', 'recall_meals', 'remember',
+    'set_targets', 'sync_oura', 'update_meal', 'weight_trend',
   ]);
 
   // 2. Auth: wrong secret -> 404, bearer on /mcp -> ok

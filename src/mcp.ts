@@ -15,6 +15,7 @@ import {
 } from './service.js';
 import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
+import { cycleStatus, deletePeriodStart, listCycles, logPeriodStart } from './cycle.js';
 import { calibration, forget, listFacts, recallMeals, remember } from './memory.js';
 import { ingestOura, type TokenSource } from './ingest/oura.js';
 
@@ -96,6 +97,52 @@ export function createMcpServer({ db, ouraTokenSource }: McpDeps): McpServer {
       inputSchema: {},
     },
     async () => json(await calibration(db)),
+  );
+
+  server.registerTool(
+    'cycle_status',
+    {
+      title: 'Where she is in her cycle',
+      description:
+        'Cycle day, predicted phase, her own mean cycle length and notes. Needed to read the scale honestly: the ' +
+        'luteal phase commonly adds 1-2 kg of water. The phase is predicted from logged starts, not observed.',
+      inputSchema: { day: dayArg },
+    },
+    async ({ day }) => json(await cycleStatus(db, day ?? today())),
+  );
+
+  server.registerTool(
+    'log_period_start',
+    {
+      title: 'Record a period start',
+      description: 'The first day of a period. Defaults to today.',
+      inputSchema: { day: dayArg, note: z.string().optional() },
+    },
+    async ({ day, note }) => {
+      const d = day ?? today();
+      await logPeriodStart(db, d, note);
+      return json(await cycleStatus(db, d));
+    },
+  );
+
+  server.registerTool(
+    'delete_period_start',
+    {
+      title: 'Remove a period start',
+      description: 'Undo a mistaken entry.',
+      inputSchema: { day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) },
+    },
+    async ({ day }) => json({ deleted: await deletePeriodStart(db, day) }),
+  );
+
+  server.registerTool(
+    'list_cycles',
+    {
+      title: 'Logged cycles',
+      description: 'Period starts with the length of the cycle each one began.',
+      inputSchema: { limit: z.number().int().min(1).max(24).default(12) },
+    },
+    async ({ limit }) => json({ cycles: await listCycles(db, limit) }),
   );
 
   server.registerTool(

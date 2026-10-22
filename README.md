@@ -25,7 +25,10 @@ either Caddy (standalone) or an existing Traefik (Hostinger template).
 | Table | What it holds |
 |---|---|
 | `meals` | one row per meal: local calendar `day`, kcal, protein/fat/carbs, confidence, source |
-| `daily_metrics` | one row per `(day, source)`: active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min, raw payload |
+| `daily_metrics` | one row per `(day, source)`: active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min, temp_deviation, raw payload |
+| `cycle_events` | logged period starts |
+| `facts` | durable sentences about the person |
+| `meal_corrections` | before and after on every meal edit |
 | `weights` | weigh-ins |
 | `targets` | versioned targets; the latest row with `valid_from <= day` applies |
 
@@ -47,7 +50,8 @@ lands on the day you'd expect.
 `log_meal`, `update_meal`, `delete_meal`, `get_day`, `get_week`, `log_weight`,
 `weight_trend`, `get_targets`, `set_targets`, `sync_oura`, `energy_balance`,
 `insights`, `recall_meals`, `remember`, `forget_fact`, `list_facts`,
-`calibration`.
+`calibration`, `cycle_status`, `log_period_start`, `delete_period_start`,
+`list_cycles`.
 
 Two endpoints serve them:
 
@@ -246,6 +250,25 @@ is not logged.
 None of this is learning in the sense people usually mean. It is the database
 remembering on the model's behalf, which for repeated meals is the useful kind.
 
+## The cycle
+
+Oura exposes no cycle endpoint, so a period start is something she tells the
+bot; everything after that — cycle day, phase, the expected next start — is
+derived from her own logged history rather than from a textbook 28 days, and
+the phase is reported as a prediction with its confidence.
+
+It earns its place here for one unglamorous reason: fluid retention in the
+luteal phase routinely moves the scale by one to two kilograms, which is larger
+than a fortnight of real fat loss. A trend read without it shows a plateau that
+is not there, and the obvious response to an imaginary plateau — eat less — is
+the wrong one. So the briefing says which phase she is in, `energy_balance`
+flags a window whose two weigh-ins fall in different phases, and `insights`
+compares luteal intake against the rest of the cycle.
+
+Oura's nightly skin-temperature deviation is captured alongside, since it rises
+after ovulation and is the one signal already in the data that can corroborate
+a phase she has not logged.
+
 ## Measured expenditure
 
 A calorie target is normally a formula: a guess at resting metabolism times a
@@ -293,6 +316,8 @@ GET  /api/insights?days=28
 GET  /api/briefing
 GET  /api/facts
 GET  /api/calibration
+GET  /api/cycle?date=YYYY-MM-DD
+POST /api/cycle/start   { day?, note? }
 POST /api/meals        { description, kcal, protein_g?, fat_g?, carbs_g?, confidence?, eaten_at?, source? }
 POST /api/ingest/oura?days=3
 ```
@@ -323,6 +348,7 @@ npm run test:readiness # startup retry, and what /healthz says while the db is d
 npm run test:telegram  # bot pairing, photo and text meals, queries, /undo
 npm run test:energy    # measured expenditure, the splits, and what they refuse to say
 npm run test:memory    # facts, the food dictionary, and the correction log
+npm run test:cycle     # cycle day, phase, and where the phase changes a reading
 npm run dev            # needs DATABASE_URL and the secrets in the environment
 npm run build
 ```

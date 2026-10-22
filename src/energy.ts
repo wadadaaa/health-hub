@@ -16,6 +16,7 @@
  */
 import type { Queryable } from './db.js';
 import { dayRange, dbDay, shiftDay, today } from './dates.js';
+import { phasesByDay } from './cycle.js';
 import { getTargets, weightTrend, type WeightTrend } from './service.js';
 
 /** Energy in a kilogram of body tissue, the conventional figure. */
@@ -94,10 +95,11 @@ export async function energyBalance(
 ): Promise<EnergyBalance> {
   const start = shiftDay(endDay, -(days - 1));
   const span = dayRange(start, endDay);
-  const [intake, trend, targets] = await Promise.all([
+  const [intake, trend, targets, phases] = await Promise.all([
     intakeByDay(db, start, endDay),
     weightTrend(db, days + 7, endDay),
     getTargets(db, endDay),
+    phasesByDay(db, start, endDay),
   ]);
 
   const logged = span.filter(d => (intake.get(d)?.meals ?? 0) > 0);
@@ -142,6 +144,20 @@ export async function energyBalance(
     );
     if (!w.first!.smoothed || !w.last!.smoothed) {
       notes.push('Один из концов окна — разовое взвешивание, а не среднее за 7 дней: шум по воде сюда попадает.');
+    }
+  }
+
+  // Water weight moves with the cycle, so two weigh-ins taken in different
+  // phases can differ by more than a fortnight of fat. Say so rather than
+  // quietly folding it into the answer.
+  if (tdee != null && w.first && w.last) {
+    const a = phases.get(w.first.day);
+    const b = phases.get(w.last.day);
+    if (a && b && a !== 'неизвестно' && b !== 'неизвестно' && a !== b) {
+      notes.push(
+        `Концы окна в разных фазах цикла (${a} → ${b}). Вода между фазами гуляет на 1–2 кг, ` +
+          'так что к числу стоит относиться как к оценке, а не как к измерению.',
+      );
     }
   }
 

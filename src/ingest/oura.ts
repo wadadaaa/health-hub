@@ -43,6 +43,11 @@ interface DailyActivity {
 interface DailyScore {
   day: string;
   score?: number | null;
+  // Readiness carries the nightly skin-temperature deviation from the
+  // wearer's own baseline. Optional on purpose: if Oura stops sending it the
+  // sync should lose the field, not the day.
+  temperature_deviation?: number | null;
+  temperature_trend_deviation?: number | null;
 }
 interface Workout {
   day: string;
@@ -120,6 +125,7 @@ export async function ingestOura(
       activity?: DailyActivity;
       sleep_score?: number | null;
       readiness?: number | null;
+      temp_deviation?: number | null;
       sessions: SleepSession[];
       workouts: Workout[];
     }
@@ -131,7 +137,12 @@ export async function ingestOura(
   };
   for (const a of activity) if (a.day <= endDay) slot(a.day).activity = a;
   for (const s of sleepScores) if (s.day <= endDay) slot(s.day).sleep_score = s.score ?? null;
-  for (const r of readiness) if (r.day <= endDay) slot(r.day).readiness = r.score ?? null;
+  for (const r of readiness) {
+    if (r.day > endDay) continue;
+    const t = slot(r.day);
+    t.readiness = r.score ?? null;
+    t.temp_deviation = r.temperature_deviation ?? r.temperature_trend_deviation ?? null;
+  }
   for (const s of sessions) if (s.day <= endDay) slot(s.day).sessions.push(s);
   for (const w of workouts) if (w.day <= endDay) slot(w.day).workouts.push(w);
 
@@ -162,6 +173,7 @@ export async function ingestOura(
         resting_hr: lows.length ? Math.min(...lows) : null,
         readiness: d.readiness ?? null,
         workout_min: workoutMin > 0 ? workoutMin : null,
+        temp_deviation: d.temp_deviation ?? null,
       },
       {
         activity_score: a?.score ?? null,

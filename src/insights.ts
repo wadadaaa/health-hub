@@ -10,6 +10,7 @@
  * not a mechanism.
  */
 import type { Queryable } from './db.js';
+import { phasesByDay } from './cycle.js';
 import { dayRange, dbDay, shiftDay, today } from './dates.js';
 
 /** Below this many days on either side, a split is not worth printing. */
@@ -139,7 +140,7 @@ function split(
 
 export async function insights(db: Queryable, days = 28, endDay: string = today()): Promise<Insights> {
   const start = shiftDay(endDay, -(days - 1));
-  const f = await facts(db, start, endDay);
+  const [f, phases] = await Promise.all([facts(db, start, endDay), phasesByDay(db, start, endDay)]);
   const span = dayRange(start, endDay);
   const withFood = span.filter(d => (f.get(d)?.meals ?? 0) > 0);
 
@@ -177,7 +178,21 @@ export async function insights(db: Queryable, days = 28, endDay: string = today(
     .map(x => ({ cond: (x.workout_min ?? 0) >= 20, value: x.protein_g! }));
   splits.push(split('Сколько белка в дни с тренировкой', 'тренировка 20+ мин', 'без тренировки', 'г', proteinRows));
 
+  // 5. The luteal phase against the rest, on intake. This is the one split
+  //    with a mechanism behind it rather than a hunch, which is also why it is
+  //    worth watching for noise: hunger varies for many reasons at once.
+  const lutealRows = withFood
+    .map(d => ({ f: f.get(d)!, phase: phases.get(d) }))
+    .filter(x => x.f.kcal != null && x.phase && x.phase !== 'неизвестно')
+    .map(x => ({ cond: x.phase === 'лютеиновая', value: x.f.kcal! }));
+  splits.push(
+    split('Сколько съедено в лютеиновой фазе', 'лютеиновая фаза', 'остальной цикл', 'ккал', lutealRows),
+  );
+
   const notes: string[] = [];
+  if (!lutealRows.length) {
+    notes.push('Фазы цикла не размечены — отметь начало цикла, и сравнение по фазам появится.');
+  }
   if (withFood.length < 2 * MIN_GROUP) {
     notes.push(
       `Дней с записанной едой: ${withFood.length}. Чтобы сравнивать группы, нужно хотя бы ${2 * MIN_GROUP}.`,
