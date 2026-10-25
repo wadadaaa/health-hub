@@ -5,6 +5,7 @@
 import type { Queryable } from '../db.js';
 import { shiftDay, today } from '../dates.js';
 import { upsertMetrics } from '../service.js';
+import { logWorkout } from '../training.js';
 
 const BASE = 'https://api.ouraring.com/v2/usercollection';
 
@@ -50,6 +51,7 @@ interface DailyScore {
   temperature_trend_deviation?: number | null;
 }
 interface Workout {
+  id?: string | null;
   day: string;
   activity?: string | null;
   calories?: number | null;
@@ -160,6 +162,26 @@ export async function ingestOura(
     const workoutMin = minutes(d.workouts);
     // Kept because it is genuinely useful, just not as "workout".
     const activeMin = a ? ((a.high_activity_time ?? 0) + (a.medium_activity_time ?? 0)) / 60 : null;
+
+    // Each session also gets its own row, so a plan has something to be judged
+    // against. Oura knows what and how long; only she knows how hard.
+    for (const w of d.workouts) {
+      const mins = minutes([w]);
+      if (!w.start_datetime || mins <= 0) continue;
+      try {
+        await logWorkout(db, {
+          sport: w.activity ?? 'workout',
+          minutes: mins,
+          started_at: new Date(w.start_datetime),
+          kcal: w.calories ?? null,
+          source: 'oura',
+          external_id: w.id ?? `${w.start_datetime}:${w.activity ?? ''}`,
+          note: w.label ?? null,
+        });
+      } catch (e) {
+        console.error('[oura] workout not stored:', e instanceof Error ? e.message : e);
+      }
+    }
 
     await upsertMetrics(
       db,

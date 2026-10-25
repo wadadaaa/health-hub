@@ -8,6 +8,7 @@
  */
 import type { Queryable } from '../db.js';
 import { localDay, parseLooseDate } from '../dates.js';
+import { logWorkout, type LogWorkoutInput } from '../training.js';
 import { logWeight, upsertMetrics, type MetricFields } from '../service.js';
 
 interface Sample {
@@ -30,12 +31,38 @@ interface Metric {
 }
 
 interface Workout {
+  id?: string;
   name?: string;
   start?: string;
   end?: string;
   duration?: number | string; // seconds in current exports
   activeEnergyBurned?: { qty?: number | string; units?: string } | number;
+  distance?: { qty?: number | string; units?: string } | number;
+  avgHeartRate?: { qty?: number | string; units?: string } | number;
+  maxHeartRate?: { qty?: number | string; units?: string } | number;
   [k: string]: unknown;
+}
+
+/** Health Auto Export wraps most numbers as { qty, units }; some exports don't. */
+function qty(v: unknown): number | null {
+  if (v == null) return null;
+  if (typeof v === 'number' || typeof v === 'string') return n(v);
+  if (typeof v === 'object' && 'qty' in (v as Record<string, unknown>)) {
+    return n((v as { qty?: number | string }).qty);
+  }
+  return null;
+}
+
+/** Kilometres, whatever the export decided to send. */
+function km(v: unknown): number | null {
+  const value = qty(v);
+  if (value == null) return null;
+  const units =
+    typeof v === 'object' && v !== null && 'units' in v ? String((v as { units?: string }).units ?? '') : '';
+  const u = units.toLowerCase();
+  if (u.startsWith('mi')) return Math.round(value * 1.60934 * 100) / 100;
+  if (u === 'm' || u.startsWith('met')) return Math.round((value / 1000) * 100) / 100;
+  return Math.round(value * 100) / 100;
 }
 
 export interface HealthAutoExportPayload {
@@ -82,6 +109,7 @@ const add = (a: Agg, v: number) => {
 export interface AppleIngestResult {
   days: string[];
   weights: number;
+  workouts: number;
   unknown: string[];
 }
 
@@ -97,6 +125,7 @@ export async function ingestHealthAutoExport(db: Queryable, body: HealthAutoExpo
   };
   const unknown = new Set<string>();
   const weightSamples: { at: Date; kg: number }[] = [];
+  const sessions: LogWorkoutInput[] = [];
 
   for (const m of metrics) {
     const k = key(m.name);
@@ -162,6 +191,22 @@ export async function ingestHealthAutoExport(db: Queryable, body: HealthAutoExpo
       if (end) seconds = (end.getTime() - start.getTime()) / 1000;
     }
     if (seconds != null) add(dayAgg(day, 'workout_min'), seconds / 60);
+
+    // The session in its own right, for the training side of the house.
+    if (seconds != null && seconds > 0) {
+      const energy = qty(w.activeEnergyBurned);
+      sessions.push({
+        sport: (w.name ?? 'workout').toString().slice(0, 60),
+        minutes: seconds / 60,
+        started_at: start,
+        distance_km: km(w.distance),
+        avg_hr: qty(w.avgHeartRate) == null ? null : Math.round(qty(w.avgHeartRate)!),
+        max_hr: qty(w.maxHeartRate) == null ? null : Math.round(qty(w.maxHeartRate)!),
+        kcal: energy == null ? null : Math.round(energy),
+        source: 'apple',
+        external_id: w.id ?? `${start.toISOString()}:${w.name ?? ''}`,
+      });
+    }
   }
 
   const days: string[] = [];
@@ -183,8 +228,20 @@ export async function ingestHealthAutoExport(db: Queryable, body: HealthAutoExpo
   }
 
   for (const w of weightSamples) await logWeight(db, w.kg, w.at, 'apple');
+  for (const session of sessions) {
+    try {
+      await logWorkout(db, session);
+    } catch (e) {
+      console.error('[apple] workout not stored:', e instanceof Error ? e.message : e);
+    }
+  }
 
-  return { days: days.sort(), weights: weightSamples.length, unknown: [...unknown].sort() };
+  return {
+    days: days.sort(),
+    weights: weightSamples.length,
+    workouts: sessions.length,
+    unknown: [...unknown].sort(),
+  };
 }
 
 /** Minimal payload for a hand-made iOS Shortcut: { date?, active_kcal?, steps?, resting_hr?, hrv?, sleep_min?, workout_min?, weight_kg? } */

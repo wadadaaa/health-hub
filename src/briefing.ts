@@ -12,6 +12,7 @@ import { shiftDay, today } from './dates.js';
 import { cycleStatus } from './cycle.js';
 import { energyBalance } from './energy.js';
 import { getDay, weightTrend } from './service.js';
+import { listWorkouts, trainingLoad } from './training.js';
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 const hhmm = (min: number) => `${Math.floor(min / 60)}:${String(Math.round(min) % 60).padStart(2, '0')}`;
@@ -26,6 +27,7 @@ export async function composeBriefing(db: Queryable, day: string = today()): Pro
     energyBalance(db, 28, day),
     cycleStatus(db, day),
   ]);
+  const [load, recent] = await Promise.all([trainingLoad(db, day), listWorkouts(db, 7, day)]);
 
   const lines: string[] = [`☀️ <b>${day}</b>`];
 
@@ -70,6 +72,16 @@ export async function composeBriefing(db: Queryable, day: string = today()): Pro
     const hedge = cycle.confidence === 'assumed' ? ', фаза предположительная' : '';
     lines.push(`🌙 Цикл: день ${cycle.cycle_day}, ${cycle.phase}${hedge}`);
     if (cycle.phase === 'лютеиновая') lines.push('   вес сейчас может держать 1–2 кг воды — это не жир');
+  }
+
+  // Training, once there is any.
+  if (load.sessions_7d) {
+    lines.push('', `🏃 За 7 дней: ${load.sessions_7d} трен., ${load.minutes_7d} мин`);
+    const sports = load.by_sport.map(s => `${s.sport} ${s.minutes}′`).join(' · ');
+    if (sports) lines.push(`   ${sports}`);
+    if (load.verdict === 'растёт быстро') lines.push('   ⚠️ объём растёт быстрее, чем успевают связки');
+    const noRpe = recent.filter(w => w.rpe == null).length;
+    if (noRpe) lines.push(`   у ${noRpe} сессий не отмечено, как прошло — скажи, посчитаю нагрузку точнее`);
   }
 
   // The measured expenditure, once there is enough of it to mean anything.

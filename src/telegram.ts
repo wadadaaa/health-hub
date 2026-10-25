@@ -10,6 +10,7 @@
 import type { Queryable } from './db.js';
 import { AgentError, forgetHistory, respond, type Block } from './agent.js';
 import { composeBriefing } from './briefing.js';
+import { trainingLoad } from './training.js';
 import { getSetting, setSetting } from './settings.js';
 import {
   deleteMeal,
@@ -131,6 +132,7 @@ const HELP = [
   '⚖️ <b>«вес 81.4»</b> — записать взвешивание',
   '🗑 <b>/undo</b> — удалить последнюю запись',
   '☀️ <b>/brief</b> — утренняя сводка (сама приходит в 7:10)',
+  '🏃 <b>«пробежала 40 минут, тяжело»</b> — записать тренировку; спрошу, как по 10-балльной\n   /load — нагрузка за неделю',
   '🌙 <b>«первый день цикла»</b> — отметить начало; дальше фазы считаются сами',
   '🧹 <b>/forget</b> — забыть разговор (записи еды останутся)',
 ].join('\n');
@@ -204,6 +206,16 @@ async function route(deps: TelegramDeps, msg: TgMessage, chatId: number): Promis
     }
     await deleteMeal(db, last.id);
     await send(token, chatId, `🗑 Удалила: ${last.description} (−${last.kcal} ккал)\n\n${dayLine(await getDay(db))}`);
+    return;
+  }
+
+  if (text.startsWith('/load')) {
+    const l = await trainingLoad(db);
+    const sports = l.by_sport.map(x => `${x.sport}: ${x.sessions} × ${x.minutes}′`).join('\n');
+    const head = `🏃 <b>Нагрузка</b> — ${l.verdict}\nНеделя ${l.acute} · месячный фон ${l.chronic}${
+      l.ratio != null ? ` · отношение ${l.ratio}` : ''
+    }`;
+    await send(token, chatId, [head, sports, l.notes.join('\n')].filter(Boolean).join('\n\n'));
     return;
   }
 

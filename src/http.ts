@@ -3,6 +3,7 @@ import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
 import { cycleStatus, logPeriodStart } from './cycle.js';
 import { calibration, listFacts } from './memory.js';
+import { listWorkouts, trainingLoad } from './training.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -230,6 +231,15 @@ export function createApp({ db, config, oura, readiness, publicUrl }: AppDeps) {
     const day = typeof b.day === 'string' && isDay(b.day) ? b.day : today();
     await logPeriodStart(db, day, typeof b.note === 'string' ? b.note : undefined);
     res.json(await cycleStatus(db, day));
+  });
+
+  api.get('/workouts', async (req, res) => {
+    const days = Math.min(120, Math.max(1, Number(req.query.days ?? 14) || 14));
+    res.json({ workouts: await listWorkouts(db, days) });
+  });
+
+  api.get('/load', async (_req, res) => {
+    res.json(await trainingLoad(db));
   });
 
   api.get('/facts', async (_req, res) => {

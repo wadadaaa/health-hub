@@ -17,6 +17,7 @@ import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
 import { cycleStatus, deletePeriodStart, listCycles, logPeriodStart } from './cycle.js';
 import { calibration, forget, listFacts, recallMeals, remember } from './memory.js';
+import { deleteWorkout, listWorkouts, logWorkout, trainingLoad, updateWorkout } from './training.js';
 import { ingestOura, type TokenSource } from './ingest/oura.js';
 
 const json = (data: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] });
@@ -97,6 +98,87 @@ export function createMcpServer({ db, ouraTokenSource }: McpDeps): McpServer {
       inputSchema: {},
     },
     async () => json(await calibration(db)),
+  );
+
+  server.registerTool(
+    'log_workout',
+    {
+      title: 'Record a training session',
+      description:
+        'A session, with how hard it felt on 1-10. Devices file their own, so check list_workouts before adding a ' +
+        'duplicate; adding the effort to an existing one is usually the right move.',
+      inputSchema: {
+        sport: z.string().min(1).max(60),
+        minutes: z.number().min(1).max(600),
+        rpe: z.number().int().min(1).max(10).optional(),
+        distance_km: z.number().min(0).optional(),
+        avg_hr: z.number().int().min(30).max(230).optional(),
+        note: z.string().max(500).optional(),
+        started_at: z.string().datetime({ offset: true }).optional(),
+      },
+    },
+    async (a) =>
+      json({
+        workout: await logWorkout(db, {
+          ...a,
+          started_at: a.started_at ? new Date(a.started_at) : undefined,
+          source: 'mcp',
+        }),
+        load: await trainingLoad(db),
+      }),
+  );
+
+  server.registerTool(
+    'update_workout',
+    {
+      title: 'Correct a session',
+      description: 'Change a session by id — most often to add how hard it felt to one a device filed.',
+      inputSchema: {
+        id: z.number().int(),
+        sport: z.string().min(1).max(60).optional(),
+        minutes: z.number().min(1).max(600).optional(),
+        rpe: z.number().int().min(1).max(10).optional(),
+        distance_km: z.number().min(0).optional(),
+        avg_hr: z.number().int().min(30).max(230).optional(),
+        note: z.string().max(500).optional(),
+      },
+    },
+    async ({ id, ...patch }) => {
+      const w = await updateWorkout(db, id, patch);
+      return json(w ? { workout: w } : { error: `no workout with id ${id}` });
+    },
+  );
+
+  server.registerTool(
+    'delete_workout',
+    {
+      title: 'Remove a session',
+      description: 'Delete a training session by id.',
+      inputSchema: { id: z.number().int() },
+    },
+    async ({ id }) => json({ deleted: await deleteWorkout(db, id) }),
+  );
+
+  server.registerTool(
+    'list_workouts',
+    {
+      title: 'Training sessions',
+      description: 'Sessions with ids, source and how hard each felt.',
+      inputSchema: { days: z.number().int().min(1).max(120).default(14) },
+    },
+    async ({ days }) => json({ workouts: await listWorkouts(db, days) }),
+  );
+
+  server.registerTool(
+    'training_load',
+    {
+      title: 'Training load',
+      description:
+        'Last week against the last month as session RPE × minutes, with a verdict. Call before suggesting more ' +
+        'volume; "растёт быстро" means she is adding faster than tendons adapt.',
+      inputSchema: {},
+    },
+    async () => json(await trainingLoad(db)),
   );
 
   server.registerTool(

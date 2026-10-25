@@ -27,6 +27,7 @@ either Caddy (standalone) or an existing Traefik (Hostinger template).
 | `meals` | one row per meal: local calendar `day`, kcal, protein/fat/carbs, confidence, source |
 | `daily_metrics` | one row per `(day, source)`: active_kcal, steps, resting_hr, hrv, sleep_min, readiness, workout_min, temp_deviation, raw payload |
 | `cycle_events` | logged period starts |
+| `workouts` | one row per training session, with how hard it felt |
 | `facts` | durable sentences about the person |
 | `meal_corrections` | before and after on every meal edit |
 | `weights` | weigh-ins |
@@ -51,7 +52,8 @@ lands on the day you'd expect.
 `weight_trend`, `get_targets`, `set_targets`, `sync_oura`, `energy_balance`,
 `insights`, `recall_meals`, `remember`, `forget_fact`, `list_facts`,
 `calibration`, `cycle_status`, `log_period_start`, `delete_period_start`,
-`list_cycles`.
+`list_cycles`, `log_workout`, `update_workout`, `delete_workout`,
+`list_workouts`, `training_load`.
 
 Two endpoints serve them:
 
@@ -250,6 +252,31 @@ is not logged.
 None of this is learning in the sense people usually mean. It is the database
 remembering on the model's behalf, which for repeated meals is the useful kind.
 
+## Training
+
+Sessions get their own table rather than collapsing into daily minutes, because
+a plan has to be judged against sessions. Three sources write to it: Oura's
+workout collection, Health Auto Export or a Shortcut from the phone, and the
+chat. A stable `external_id` makes re-syncs idempotent, and a re-sync never
+overwrites how a session felt — the device does not know that.
+
+Load is session RPE × minutes (Foster), which is the oldest way to put a swim,
+a run and an hour of lifting on one scale. It needs the one input no watch
+supplies, so the bot asks; a session with no answer is counted at a
+conservative 5 and the shortfall is reported rather than hidden. Acute is the
+last 7 days, chronic the last 28 as a weekly average, and the ratio is a brake
+on obvious mistakes, not a number to optimise — the evidence base for it is
+contested and it is here for one case: the detrained ex-athlete whose head
+remembers a fitter body than their tendons do. Below a real chronic baseline it
+declines to call anything overload, since the first weeks are supposed to be
+small.
+
+**Strava is deliberately absent.** Its November 2024 API agreement forbids
+using data obtained through the API in AI models or similar applications, which
+is exactly what this is. The sanctioned route is Strava's own connector in
+claude.ai; this server takes its sessions from Apple Health and Oura instead,
+which are the upstream source anyway.
+
 ## The cycle
 
 Oura exposes no cycle endpoint, so a period start is something she tells the
@@ -316,6 +343,8 @@ GET  /api/insights?days=28
 GET  /api/briefing
 GET  /api/facts
 GET  /api/calibration
+GET  /api/workouts?days=14
+GET  /api/load
 GET  /api/cycle?date=YYYY-MM-DD
 POST /api/cycle/start   { day?, note? }
 POST /api/meals        { description, kcal, protein_g?, fat_g?, carbs_g?, confidence?, eaten_at?, source? }
@@ -349,6 +378,7 @@ npm run test:telegram  # bot pairing, photo and text meals, queries, /undo
 npm run test:energy    # measured expenditure, the splits, and what they refuse to say
 npm run test:memory    # facts, the food dictionary, and the correction log
 npm run test:cycle     # cycle day, phase, and where the phase changes a reading
+npm run test:training  # sessions from three sources, load, and what it won't call overload
 npm run dev            # needs DATABASE_URL and the secrets in the environment
 npm run build
 ```

@@ -15,6 +15,7 @@ import { energyBalance } from './energy.js';
 import { insights } from './insights.js';
 import { cycleStatus, deletePeriodStart, listCycles, logPeriodStart } from './cycle.js';
 import { calibration, forget, learnedPrompt, listFacts, recallMeals, remember } from './memory.js';
+import { deleteWorkout, listWorkouts, logWorkout, trainingLoad, updateWorkout } from './training.js';
 import {
   deleteMeal,
   getDay,
@@ -184,6 +185,61 @@ const TOOLS = [
     input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
+    name: 'log_workout',
+    description:
+      'Record a training session. Ask how hard it felt on 1-10 (1 a stroll, 10 everything she had) if she has not ' +
+      'said — it is the one number no device supplies and the one the load calculation needs most. Oura and the ' +
+      'phone file their own sessions automatically, so check list_workouts first before adding a duplicate.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        sport: { type: 'string', description: 'бег, плавание, силовая, велосипед…' },
+        minutes: { type: 'number' },
+        rpe: { type: 'number', description: '1-10, how hard it felt.' },
+        distance_km: { type: 'number' },
+        avg_hr: { type: 'number' },
+        note: { type: 'string' },
+        started_at: { type: 'string', description: 'ISO 8601 with offset. Default: now.' },
+      },
+      required: ['sport', 'minutes'],
+    },
+  },
+  {
+    name: 'update_workout',
+    description: 'Correct a session by id, most often to add how hard it felt to one the device filed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number' },
+        sport: { type: 'string' },
+        minutes: { type: 'number' },
+        rpe: { type: 'number' },
+        distance_km: { type: 'number' },
+        avg_hr: { type: 'number' },
+        note: { type: 'string' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_workout',
+    description: 'Remove a session by id.',
+    input_schema: { type: 'object', properties: { id: { type: 'number' } }, required: ['id'] },
+  },
+  {
+    name: 'list_workouts',
+    description: 'Training sessions with ids, source and how hard each felt.',
+    input_schema: { type: 'object', properties: { days: { type: 'number' } }, required: [] },
+  },
+  {
+    name: 'training_load',
+    description:
+      'Load over the last week against the last month, as session RPE × minutes. Call this before suggesting ' +
+      'anything about training volume. A verdict of "растёт быстро" means she is adding faster than tendons adapt ' +
+      'after a long break — say so plainly rather than encouraging more.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
     name: 'cycle_status',
     description:
       'Where she is in her menstrual cycle: cycle day, predicted phase, her own mean cycle length, and notes. ' +
@@ -281,6 +337,30 @@ async function runTool(db: Queryable, name: string, a: Record<string, unknown>):
       return { facts: await listFacts(db) };
     case 'calibration':
       return calibration(db);
+    case 'log_workout':
+      return {
+        workout: await logWorkout(db, {
+          sport: String(a.sport),
+          minutes: Number(a.minutes),
+          rpe: a.rpe == null ? null : Math.round(Number(a.rpe)),
+          distance_km: a.distance_km == null ? null : Number(a.distance_km),
+          avg_hr: a.avg_hr == null ? null : Math.round(Number(a.avg_hr)),
+          note: a.note ? String(a.note) : null,
+          started_at: a.started_at ? new Date(String(a.started_at)) : undefined,
+          source: 'telegram',
+        }),
+        load: await trainingLoad(db),
+      };
+    case 'update_workout': {
+      const w = await updateWorkout(db, Number(a.id), a);
+      return w ? { workout: w } : { error: `no workout with id ${a.id}` };
+    }
+    case 'delete_workout':
+      return { deleted: await deleteWorkout(db, Number(a.id)) };
+    case 'list_workouts':
+      return { workouts: await listWorkouts(db, Number(a.days ?? 14)) };
+    case 'training_load':
+      return trainingLoad(db);
     case 'cycle_status':
       return cycleStatus(db, (a.day as string) ?? today());
     case 'log_period_start':
@@ -332,6 +412,12 @@ async function system(db: Queryable): Promise<string> {
     '',
     'When the person names the dish from a menu, trust the menu over the look of the photo: a stew is not fried, and a',
     'named grain is not the one you guessed.',
+    '',
+    'TRAINING',
+    'A session she mentions is log_workout, and if she did not say how hard it felt, ask: one number, 1-10. Devices',
+    'file their own sessions, so check list_workouts before adding what is already there — more often the right move',
+    'is update_workout to add the effort to a session Oura already caught. Before saying anything about doing more,',
+    'call training_load.',
     '',
     'THE CYCLE',
     'Before reading the scale, a plateau, or a question about appetite, call cycle_status. In the luteal phase the',
